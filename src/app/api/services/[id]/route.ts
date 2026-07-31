@@ -39,11 +39,19 @@ export async function PUT(
   if (!existing.length) {
     return NextResponse.json({ error: "服务不存在" }, { status: 404 });
   }
-  run(
-    db,
-    "UPDATE services SET name = COALESCE(?, name), description = COALESCE(?, description), owner = COALESCE(?, owner) WHERE id = ?",
-    [name ?? null, description ?? null, owner ?? null, idNum]
-  );
+  try {
+    run(
+      db,
+      "UPDATE services SET name = COALESCE(?, name), description = COALESCE(?, description), owner = COALESCE(?, owner) WHERE id = ?",
+      [name ?? null, description ?? null, owner ?? null, idNum]
+    );
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes("UNIQUE constraint failed")) {
+      return NextResponse.json({ error: "服务名已存在" }, { status: 409 });
+    }
+    return NextResponse.json({ error: msg }, { status: 500 });
+  }
   const updated = query(db, "SELECT * FROM services WHERE id = ?", [idNum]);
   return NextResponse.json(updated[0]);
 }

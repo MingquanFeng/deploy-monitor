@@ -22,6 +22,31 @@ npm run dev
 
 访问 http://localhost:3000
 
+## Docker 部署
+
+```bash
+# 准备环境变量（至少设置 WEBHOOK_TOKEN）
+cp .env.example .env
+
+# 构建并后台启动
+docker compose up -d
+
+# 查看日志
+docker compose logs -f
+
+# 停止
+docker compose down
+```
+
+访问 http://localhost:3000
+
+SQLite 数据文件通过命名卷 `deploy-monitor-data` 挂载到容器内 `/app/data`，
+容器重建或升级镜像后数据不会丢失。如需彻底清除数据：
+
+```bash
+docker compose down -v
+```
+
 ## 技术栈
 
 | 层 | 选型 |
