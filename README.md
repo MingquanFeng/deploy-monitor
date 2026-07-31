@@ -1,5 +1,7 @@
 # 部署监控面板
 
+[![CI](https://github.com/MingquanFeng/deploy-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/MingquanFeng/deploy-monitor/actions/workflows/ci.yml)
+
 轻量级服务部署状态监控面板，打开网页即可查看每个服务在各环境的部署状态，告别 SSH 看日志和群里问"上线了吗"。
 
 ## 功能
