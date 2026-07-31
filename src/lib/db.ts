@@ -6,6 +6,24 @@ const DB_PATH = path.join(process.cwd(), "data", "deploy.db");
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
+/**
+ * 应用层生成本地时间字符串,格式 YYYY-MM-DD HH:MM:SS
+ * 统一所有时间字段的写入路径,避免 SQL 端 datetime('now','localtime')
+ * 在不同时区机器上表现不一致
+ */
+export function nowLocal(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return (
+    d.getFullYear() +
+    "-" + pad(d.getMonth() + 1) +
+    "-" + pad(d.getDate()) +
+    " " + pad(d.getHours()) +
+    ":" + pad(d.getMinutes()) +
+    ":" + pad(d.getSeconds())
+  );
+}
+
 let db: SqlJsDatabase;
 
 const initPromise = (async () => {
@@ -19,13 +37,14 @@ const initPromise = (async () => {
 
   db.run("PRAGMA foreign_keys = ON");
 
+  // 时间字段一律由应用层通过 nowLocal() 显式传入,SQL 默认值不再依赖 localtime
   db.run(`
     CREATE TABLE IF NOT EXISTS services (
       id         INTEGER PRIMARY KEY AUTOINCREMENT,
       name       TEXT    UNIQUE NOT NULL,
       description TEXT   DEFAULT '',
       owner      TEXT    DEFAULT '',
-      created_at TEXT    DEFAULT (datetime('now', 'localtime'))
+      created_at TEXT    DEFAULT NULL
     )
   `);
 
@@ -38,7 +57,7 @@ const initPromise = (async () => {
       status      TEXT    NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','success','failed')),
       deployed_by TEXT    DEFAULT '',
       note        TEXT    DEFAULT '',
-      started_at  TEXT    DEFAULT (datetime('now', 'localtime')),
+      started_at  TEXT    DEFAULT NULL,
       finished_at TEXT
     )
   `);

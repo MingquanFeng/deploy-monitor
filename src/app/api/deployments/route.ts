@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDb, query, run } from "@/lib/db";
+import { getDb, nowLocal, query, run } from "@/lib/db";
 
 export async function GET(req: NextRequest) {
   const db = await getDb();
@@ -39,8 +39,8 @@ export async function POST(req: NextRequest) {
 
   run(
     db,
-    "INSERT INTO deployments (service_id, environment, version, deployed_by, note) VALUES (?, ?, ?, ?, ?)",
-    [service_id, environment, version || "", deployed_by || "", note || ""]
+    "INSERT INTO deployments (service_id, environment, version, deployed_by, note, started_at) VALUES (?, ?, ?, ?, ?, ?)",
+    [service_id, environment, version || "", deployed_by || "", note || "", nowLocal()]
   );
 
   const rows = query(

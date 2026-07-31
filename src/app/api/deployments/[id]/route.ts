@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDb, query, run } from "@/lib/db";
+import { getDb, nowLocal, query, run } from "@/lib/db";
 
 export async function PUT(
   req: NextRequest,
@@ -19,9 +19,7 @@ export async function PUT(
   }
 
   const finishedAt =
-    status === "success" || status === "failed"
-      ? new Date().toISOString().replace("T", " ").slice(0, 19)
-      : null;
+    status === "success" || status === "failed" ? nowLocal() : null;
 
   run(
     db,

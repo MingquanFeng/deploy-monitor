@@ -29,6 +29,22 @@ const STATUS_COLORS: Record<string, string> = {
   failed: "bg-red-500",
 };
 
+function formatRelativeTime(dateStr: string): string {
+  const date = new Date(dateStr);
+  const now = Date.now();
+  const diffSec = Math.floor((now - date.getTime()) / 1000);
+
+  if (diffSec < 60) return "刚刚";
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分钟前`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} 小时前`;
+  if (diffSec < 86400 * 30) return `${Math.floor(diffSec / 86400)} 天前`;
+
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
 export default function Dashboard() {
   const [services, setServices] = useState<Service[]>([]);
   const [deployments, setDeployments] = useState<Deployment[]>([]);
@@ -40,12 +56,14 @@ export default function Dashboard() {
 
   const getLatestDeployments = (serviceId: number) => {
     const envs: Record<string, Deployment> = {};
+    let lastDeployment: Deployment | null = null;
+    // 列表已按 started_at DESC 排序,首个匹配即最新
     for (const d of deployments) {
-      if (d.service_id === serviceId && !envs[d.environment]) {
-        envs[d.environment] = d;
-      }
+      if (d.service_id !== serviceId) continue;
+      if (!envs[d.environment]) envs[d.environment] = d;
+      if (!lastDeployment) lastDeployment = d;
     }
-    return envs;
+    return { envs, lastDeployment };
   };
 
   return (
@@ -62,7 +80,7 @@ export default function Dashboard() {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {services.map((s) => {
-            const latest = getLatestDeployments(s.id);
+            const { envs: latest, lastDeployment } = getLatestDeployments(s.id);
             return (
               <a
                 key={s.id}
@@ -93,6 +111,12 @@ export default function Dashboard() {
                 {s.owner && (
                   <p className="text-xs text-gray-400 mt-3">负责人: {s.owner}</p>
                 )}
+                <p className="text-xs text-gray-400 mt-1">
+                  最后部署:{" "}
+                  {lastDeployment
+                    ? formatRelativeTime(lastDeployment.started_at)
+                    : "暂无部署"}
+                </p>
               </a>
             );
           })}

@@ -125,6 +125,12 @@ export default function ServicesPage() {
                 <td className="px-4 py-2">{s.owner}</td>
                 <td className="px-4 py-2 text-gray-500">{s.created_at}</td>
                 <td className="px-4 py-2">
+                  <a
+                    href={`/services/${s.id}/edit`}
+                    className="text-blue-600 hover:underline text-xs mr-3"
+                  >
+                    编辑
+                  </a>
                   <button
                     onClick={() => handleDelete(s.id)}
                     className="text-red-600 hover:underline text-xs"

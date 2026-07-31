@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDb, query, run } from "@/lib/db";
+import { getDb, nowLocal, query, run } from "@/lib/db";
 
 export async function GET() {
   const db = await getDb();
@@ -14,10 +14,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "服务名不能为空" }, { status: 400 });
   }
   try {
-    run(db, "INSERT INTO services (name, description, owner) VALUES (?, ?, ?)", [
+    run(db, "INSERT INTO services (name, description, owner, created_at) VALUES (?, ?, ?, ?)", [
       name,
       description || "",
       owner || "",
+      nowLocal(),
     ]);
     const rows = query(db, "SELECT * FROM services WHERE name = ?", [name]);
     return NextResponse.json(rows[0], { status: 201 });
