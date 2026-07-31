@@ -1,14 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-
-interface Service {
-  id: number;
-  name: string;
-  description: string;
-  owner: string;
-  created_at: string;
-}
+import type { Service } from "@/types";
 
 export default function ServicesPage() {
   const [services, setServices] = useState<Service[]>([]);

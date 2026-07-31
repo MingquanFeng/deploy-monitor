@@ -1,33 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-
-interface Service {
-  id: number;
-  name: string;
-  description: string;
-  owner: string;
-}
-
-interface Deployment {
-  service_id: number;
-  environment: string;
-  status: string;
-  started_at: string;
-  version: string;
-}
-
-const ENV_LABELS: Record<string, string> = {
-  test: "测试",
-  staging: "预发",
-  prod: "生产",
-};
-
-const STATUS_COLORS: Record<string, string> = {
-  success: "bg-green-500",
-  pending: "bg-yellow-500",
-  failed: "bg-red-500",
-};
+import { ENV_LABELS, STATUS_COLORS } from "@/lib/constants";
+import type { Service, Deployment } from "@/types";
 
 function formatRelativeTime(dateStr: string): string {
   const date = new Date(dateStr);
