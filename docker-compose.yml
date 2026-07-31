@@ -1,0 +1,18 @@
+services:
+  deploy-monitor:
+    build: .
+    image: deploy-monitor:latest
+    container_name: deploy-monitor
+    ports:
+      - "3000:3000"
+    environment:
+      # 从同目录 .env 读取（未设置时为空，webhook 端点会拒绝接入）
+      WEBHOOK_TOKEN: ${WEBHOOK_TOKEN:-}
+      DATA_DIR: /app/data
+    volumes:
+      # 命名卷持久化 SQLite 文件，容器重建数据不丢
+      - deploy-monitor-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  deploy-monitor-data:
