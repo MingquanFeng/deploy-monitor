@@ -43,16 +43,26 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "service_id 和 environment 必填" }, { status: 400 });
   }
 
+  if (!["test", "staging", "prod"].includes(environment)) {
+    return NextResponse.json({ error: "environment 必须为 test/staging/prod" }, { status: 400 });
+  }
+
+  const serviceIdNum = Number(service_id);
+  const found = query(db, "SELECT id FROM services WHERE id = ?", [serviceIdNum]);
+  if (!found.length) {
+    return NextResponse.json({ error: "服务不存在" }, { status: 404 });
+  }
+
   run(
     db,
     "INSERT INTO deployments (service_id, environment, version, deployed_by, note, started_at) VALUES (?, ?, ?, ?, ?, ?)",
-    [service_id, environment, version || "", deployed_by || "", note || "", nowLocal()]
+    [serviceIdNum, environment, version || "", deployed_by || "", note || "", nowLocal()]
   );
 
   const rows = query(
     db,
     "SELECT * FROM deployments WHERE service_id = ? AND environment = ? ORDER BY id DESC LIMIT 1",
-    [service_id, environment]
+    [serviceIdNum, environment]
   );
   return NextResponse.json(rows[0], { status: 201 });
 }

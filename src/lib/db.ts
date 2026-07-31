@@ -2,7 +2,10 @@ import initSqlJs, { Database as SqlJsDatabase } from "sql.js";
 import fs from "fs";
 import path from "path";
 
-const DB_PATH = path.join(process.cwd(), "data", "deploy.db");
+// 数据目录可通过 DATA_DIR 覆盖（容器部署时挂载卷到该路径），默认落在项目 data/ 下
+const DB_PATH = process.env.DATA_DIR
+  ? path.join(process.env.DATA_DIR, "deploy.db")
+  : path.join(process.cwd(), "data", "deploy.db");
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 
@@ -74,6 +77,11 @@ export function save() {
   if (!db) return;
   const data = db.export();
   fs.writeFileSync(DB_PATH, Buffer.from(data));
+  // sql.js 的 db.export() 会把连接级 PRAGMA 重置为默认值,foreign_keys 会变回 0。
+  // run() 每次写入都调用 save(),若不在这里补回来,第一次写操作之后外键就永久失效:
+  // 删除服务不再级联删除其部署记录(留下孤儿数据),
+  // 且能插入指向不存在服务的部署记录。回归测试见 src/lib/db.test.ts。
+  db.run("PRAGMA foreign_keys = ON");
 }
 
 export function query<T = Record<string, unknown>>(

@@ -1,0 +1,17 @@
+node_modules
+.next
+out
+data
+.git
+.gitignore
+.env
+.env.local
+.claude
+.code-review-graph
+*.tsbuildinfo
+next-env.d.ts
+Dockerfile
+.dockerignore
+docker-compose.yml
+npm-debug.log*
+.DS_Store
