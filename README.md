@@ -57,7 +57,33 @@ DELETE /api/services/:id       # 删除服务
 GET    /api/deployments        # 部署历史 (?service_id=&env=)
 POST   /api/deployments        # 新建部署记录
 PUT    /api/deployments/:id    # 更新部署状态
+
+POST   /api/webhook/deploy     # CI 接入（鉴权：Bearer WEBHOOK_TOKEN）
 ```
+
+### Webhook 接入
+
+设置环境变量 `WEBHOOK_TOKEN` 后，CI 在部署完成后上报：
+
+```bash
+curl -X POST http://your-host/api/webhook/deploy \
+  -H "Authorization: Bearer $WEBHOOK_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "service": "user-service",
+    "environment": "prod",
+    "version": "v1.2.3",
+    "status": "success",
+    "deployed_by": "github-actions",
+    "note": "deploy #456"
+  }'
+```
+
+字段说明：
+- `service`（必填）：服务名，需在面板中已存在
+- `environment`（必填）：`test` / `staging` / `prod`
+- `status`（可选，默认 `success`）：`pending` / `success` / `failed`
+- `version` / `deployed_by` / `note`：可选
 
 ## License
 

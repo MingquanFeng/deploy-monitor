@@ -1,36 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-
-interface Deployment {
-  id: number;
-  service_name: string;
-  environment: string;
-  version: string;
-  status: string;
-  deployed_by: string;
-  note: string;
-  started_at: string;
-  finished_at: string | null;
-}
-
-const ENV_LABELS: Record<string, string> = {
-  test: "测试",
-  staging: "预发",
-  prod: "生产",
-};
-
-const STATUS_LABELS: Record<string, string> = {
-  pending: "进行中",
-  success: "成功",
-  failed: "失败",
-};
-
-const STATUS_BADGE: Record<string, string> = {
-  pending: "bg-yellow-100 text-yellow-800",
-  success: "bg-green-100 text-green-800",
-  failed: "bg-red-100 text-red-800",
-};
+import { ENV_LABELS, STATUS_LABELS, STATUS_BADGE } from "@/lib/constants";
+import type { Deployment } from "@/types";
 
 export default function DeploymentsPage() {
   const [deployments, setDeployments] = useState<Deployment[]>([]);
