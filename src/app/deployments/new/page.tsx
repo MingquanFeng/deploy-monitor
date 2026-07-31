@@ -2,11 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-
-interface Service {
-  id: number;
-  name: string;
-}
+import type { Service } from "@/types";
 
 export default function NewDeploymentPage() {
   const router = useRouter();

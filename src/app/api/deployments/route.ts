@@ -31,7 +31,13 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   const db = await getDb();
-  const { service_id, environment, version, deployed_by, note } = await req.json();
+  let body: { service_id?: number | string; environment?: string; version?: string; deployed_by?: string; note?: string };
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "请求体不是合法 JSON" }, { status: 400 });
+  }
+  const { service_id, environment, version, deployed_by, note } = body;
 
   if (!service_id || !environment) {
     return NextResponse.json({ error: "service_id 和 environment 必填" }, { status: 400 });

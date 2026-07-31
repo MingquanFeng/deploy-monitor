@@ -2,13 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-
-interface Service {
-  id: number;
-  name: string;
-  description: string;
-  owner: string;
-}
+import type { Service } from "@/types";
 
 export default function EditServicePage() {
   const { id } = useParams<{ id: string }>();
