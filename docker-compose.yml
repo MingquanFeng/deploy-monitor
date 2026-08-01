@@ -12,6 +12,19 @@ services:
     volumes:
       # 命名卷持久化 SQLite 文件，容器重建数据不丢
       - deploy-monitor-data:/app/data
+    # node:20-alpine 自带 /usr/bin/wget（busybox），无 curl，故不额外装包保持镜像精简。
+    # -q -O- 丢弃响应体只看退出码；/api/health 在数据库不可用时返回 503，
+    # wget 对非 2xx/3xx 返回非 0，容器随之标记 unhealthy。
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:3000/api/health"]
+      # 探活频率：30s 足够及时，又不给 SQLite 增加无谓负载
+      interval: 30s
+      timeout: 5s
+      # 连续 3 次失败（约 90s）才判定不健康，避开单次 GC/瞬时抖动造成的误报
+      retries: 3
+      # Next.js standalone 冷启动 + sql.js WASM 初始化需要时间，
+      # 该窗口内的失败不计入 retries，也不会把容器标成 unhealthy
+      start_period: 20s
     restart: unless-stopped
 
 volumes:
