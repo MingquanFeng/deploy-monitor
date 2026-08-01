@@ -86,7 +86,26 @@ POST   /api/deployments        # 新建部署记录
 PUT    /api/deployments/:id    # 更新部署状态
 
 POST   /api/webhook/deploy     # CI 接入（鉴权：Bearer WEBHOOK_TOKEN）
+
+GET    /api/health             # 健康检查，供容器编排 / 负载均衡探活
 ```
+
+### 健康检查
+
+`GET /api/health` 无需鉴权，实时执行一次数据库探针后返回：
+
+```json
+{
+  "status": "ok",
+  "timestamp": "2026-07-31 22:30:00",
+  "checks": { "database": "ok" }
+}
+```
+
+数据库不可用时 `status` 与 `checks.database` 变为 `"error"`，HTTP 状态码为 **503**，
+正常时为 **200**。docker-compose 已配置 `healthcheck` 调用该端点，
+Kubernetes 可直接用作 `readinessProbe` / `livenessProbe`，
+ALB / Nginx 可用作 upstream 健康检查路径。
 
 ### Webhook 接入
 

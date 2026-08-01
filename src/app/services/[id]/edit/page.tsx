@@ -1,12 +1,16 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { useToast } from "@/components/Toast";
+import { BUTTON_PRIMARY, BUTTON_SECONDARY, INPUT_CLASS } from "@/lib/constants";
 import type { Service } from "@/types";
 
 export default function EditServicePage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
+  const toast = useToast();
   const [loaded, setLoaded] = useState(false);
   const [notFound, setNotFound] = useState(false);
   const [name, setName] = useState("");
@@ -46,20 +50,28 @@ export default function EditServicePage() {
     setSaving(false);
     if (!res.ok) {
       const data = await res.json();
-      setError(data.error || "保存失败");
+      const message = data.error || "保存失败";
+      setError(message);
+      toast.error(message);
       return;
     }
+    toast.success(`服务「${name}」已更新`);
     router.push("/services");
   };
 
   if (notFound) {
     return (
       <div>
-        <h1 className="text-2xl font-bold mb-4">编辑服务</h1>
-        <p className="text-red-600 text-sm">服务不存在</p>
-        <a href="/services" className="text-blue-600 hover:underline text-sm mt-3 inline-block">
+        <h1 className="mb-4 text-2xl font-bold">编辑服务</h1>
+        <p role="alert" className="text-sm text-red-600">
+          服务不存在
+        </p>
+        <Link
+          href="/services"
+          className="mt-3 inline-block text-sm text-blue-600 hover:underline"
+        >
           返回服务列表
-        </a>
+        </Link>
       </div>
     );
   }
@@ -70,60 +82,63 @@ export default function EditServicePage() {
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
+      <div className="mb-6 flex items-center justify-between">
         <h1 className="text-2xl font-bold">编辑服务</h1>
-        <a
-          href="/services"
-          className="text-sm text-gray-600 hover:underline"
-        >
+        <Link href="/services" className="text-sm text-gray-600 hover:underline">
           返回列表
-        </a>
+        </Link>
       </div>
 
       <form
         onSubmit={handleSubmit}
-        className="bg-white border rounded-lg p-4 space-y-3 max-w-2xl"
+        className="max-w-2xl space-y-4 rounded-lg border border-gray-200 bg-white p-6"
       >
-        {error && <p className="text-red-600 text-sm">{error}</p>}
-        <div className="flex flex-col gap-1">
-          <label className="text-sm text-gray-600">服务名 *</label>
+        {error && (
+          <p role="alert" aria-live="assertive" className="text-sm text-red-600">
+            {error}
+          </p>
+        )}
+        <div>
+          <label htmlFor="edit-name" className="mb-1 block text-sm font-medium">
+            服务名 <span className="text-red-500">*</span>
+          </label>
           <input
+            id="edit-name"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            className="border rounded px-3 py-1.5 text-sm"
+            className={INPUT_CLASS}
             required
           />
         </div>
-        <div className="flex flex-col gap-1">
-          <label className="text-sm text-gray-600">描述</label>
+        <div>
+          <label htmlFor="edit-desc" className="mb-1 block text-sm font-medium">
+            描述
+          </label>
           <input
+            id="edit-desc"
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            className="border rounded px-3 py-1.5 text-sm"
+            className={INPUT_CLASS}
           />
         </div>
-        <div className="flex flex-col gap-1">
-          <label className="text-sm text-gray-600">负责人</label>
+        <div>
+          <label htmlFor="edit-owner" className="mb-1 block text-sm font-medium">
+            负责人
+          </label>
           <input
+            id="edit-owner"
             value={owner}
             onChange={(e) => setOwner(e.target.value)}
-            className="border rounded px-3 py-1.5 text-sm"
+            className={INPUT_CLASS}
           />
         </div>
         <div className="flex gap-2 pt-2">
-          <button
-            type="submit"
-            disabled={saving}
-            className="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700 disabled:opacity-50"
-          >
+          <button type="submit" disabled={saving} className={BUTTON_PRIMARY}>
             {saving ? "保存中..." : "保存"}
           </button>
-          <a
-            href="/services"
-            className="bg-gray-100 text-gray-700 px-4 py-1.5 rounded text-sm hover:bg-gray-200"
-          >
+          <Link href="/services" className={BUTTON_SECONDARY}>
             取消
-          </a>
+          </Link>
         </div>
       </form>
     </div>

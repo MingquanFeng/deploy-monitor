@@ -2,10 +2,13 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { useToast } from "@/components/Toast";
+import { BUTTON_PRIMARY, INPUT_CLASS, TEXTAREA_CLASS } from "@/lib/constants";
 import type { Service } from "@/types";
 
 export default function NewDeploymentPage() {
   const router = useRouter();
+  const toast = useToast();
   const [services, setServices] = useState<Service[]>([]);
   const [serviceId, setServiceId] = useState("");
   const [env, setEnv] = useState("test");
@@ -39,26 +42,39 @@ export default function NewDeploymentPage() {
     if (!res.ok) {
       const data = await res.json();
       setError(data.error);
+      toast.error(data.error || "创建部署失败");
       setSubmitting(false);
       return;
     }
 
+    const serviceName = services.find((s) => String(s.id) === serviceId)?.name ?? "";
+    toast.success(`${serviceName} 的部署记录已创建`);
     router.push("/deployments");
   };
 
   return (
     <div className="max-w-xl">
-      <h1 className="text-2xl font-bold mb-6">新建部署</h1>
+      <h1 className="mb-6 text-2xl font-bold">新建部署</h1>
 
-      <form onSubmit={handleSubmit} className="bg-white border rounded-lg p-6 space-y-4">
-        {error && <p className="text-red-600 text-sm">{error}</p>}
+      <form
+        onSubmit={handleSubmit}
+        className="space-y-4 rounded-lg border border-gray-200 bg-white p-6"
+      >
+        {error && (
+          <p role="alert" aria-live="assertive" className="text-sm text-red-600">
+            {error}
+          </p>
+        )}
 
         <div>
-          <label className="block text-sm font-medium mb-1">服务 *</label>
+          <label htmlFor="dep-service" className="mb-1 block text-sm font-medium">
+            服务 <span className="text-red-500">*</span>
+          </label>
           <select
+            id="dep-service"
             value={serviceId}
             onChange={(e) => setServiceId(e.target.value)}
-            className="w-full border rounded px-3 py-2 text-sm"
+            className={INPUT_CLASS}
             required
           >
             <option value="">请选择服务</option>
@@ -71,51 +87,72 @@ export default function NewDeploymentPage() {
         </div>
 
         <div>
-          <label className="block text-sm font-medium mb-1">环境 *</label>
+          <label htmlFor="dep-new-env" className="mb-1 block text-sm font-medium">
+            环境 <span className="text-red-500">*</span>
+          </label>
           <select
+            id="dep-new-env"
             value={env}
             onChange={(e) => setEnv(e.target.value)}
-            className="w-full border rounded px-3 py-2 text-sm"
+            className={INPUT_CLASS}
           >
             <option value="test">测试</option>
             <option value="staging">预发</option>
             <option value="prod">生产</option>
           </select>
+          {/* 选中生产时给一句提示,降低误选的概率。 */}
+          {env === "prod" && (
+            <p className="mt-1.5 text-xs text-yellow-700">
+              这条记录将标记为生产环境部署。
+            </p>
+          )}
         </div>
 
         <div>
-          <label className="block text-sm font-medium mb-1">版本号</label>
+          <label htmlFor="dep-version" className="mb-1 block text-sm font-medium">
+            版本号
+          </label>
           <input
+            id="dep-version"
             value={version}
             onChange={(e) => setVersion(e.target.value)}
             placeholder="v1.0.0"
-            className="w-full border rounded px-3 py-2 text-sm"
+            className={INPUT_CLASS}
           />
         </div>
 
         <div>
-          <label className="block text-sm font-medium mb-1">部署人</label>
+          <label htmlFor="dep-by" className="mb-1 block text-sm font-medium">
+            部署人
+          </label>
           <input
+            id="dep-by"
             value={deployedBy}
             onChange={(e) => setDeployedBy(e.target.value)}
-            className="w-full border rounded px-3 py-2 text-sm"
+            className={INPUT_CLASS}
           />
         </div>
 
         <div>
-          <label className="block text-sm font-medium mb-1">备注</label>
+          <label htmlFor="dep-note" className="mb-1 block text-sm font-medium">
+            备注
+          </label>
           <textarea
+            id="dep-note"
             value={note}
             onChange={(e) => setNote(e.target.value)}
             rows={3}
-            className="w-full border rounded px-3 py-2 text-sm"
+            className={TEXTAREA_CLASS}
           />
         </div>
 
         <button
           type="submit"
           disabled={submitting}
-          className="w-full bg-blue-600 text-white py-2 rounded hover:bg-blue-700 disabled:opacity-50 text-sm"
+          // 只加 w-full。不要再叠 h-10:BUTTON_PRIMARY 里已有 h-9,
+          // 两个 h-* 同时存在时谁生效取决于 Tailwind 生成的 CSS 顺序,
+          // 而不是这里的书写顺序 —— 是个不会报错的坑。高度统一走 h-9。
+          className={`${BUTTON_PRIMARY} w-full`}
         >
           {submitting ? "提交中..." : "创建部署"}
         </button>
