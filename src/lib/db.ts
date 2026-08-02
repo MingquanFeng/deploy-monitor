@@ -1,6 +1,8 @@
-import initSqlJs, { Database as SqlJsDatabase } from "sql.js";
+import Database from "better-sqlite3";
 import fs from "fs";
 import path from "path";
+
+export type Db = Database.Database;
 
 // 数据目录可通过 DATA_DIR 覆盖（容器部署时挂载卷到该路径），默认落在项目 data/ 下
 const DB_PATH = process.env.DATA_DIR
@@ -27,83 +29,103 @@ export function nowLocal(): string {
   );
 }
 
-let db: SqlJsDatabase;
+const db: Db = new Database(DB_PATH);
 
-const initPromise = (async () => {
-  const SQL = await initSqlJs();
-  if (fs.existsSync(DB_PATH)) {
-    const buf = fs.readFileSync(DB_PATH);
-    db = new SQL.Database(buf);
-  } else {
-    db = new SQL.Database();
-  }
+// WAL:读不阻塞写、写不阻塞读,且写入只追加 -wal 而非重写整库。
+// 这是相对 sql.js「每次写入 export() 全库序列化 + 覆写文件」的核心改进。
+db.pragma("journal_mode = WAL");
+// NORMAL 配 WAL 是标准组合:仅在 checkpoint 时 fsync,断电最多丢最后几个事务,
+// 数据库本身不会损坏。对部署记录这种可重放的数据足够。
+db.pragma("synchronous = NORMAL");
+// 连接级 PRAGMA,只需在建连接时设一次即可对本连接的全部语句生效。
+// (sql.js 时期必须在每次 save() 后补设,因为 export() 会把它重置为 0。)
+db.pragma("foreign_keys = ON");
+// 并发写入时不立即报 SQLITE_BUSY,先等待重试
+db.pragma("busy_timeout = 5000");
 
-  db.run("PRAGMA foreign_keys = ON");
+// 时间字段一律由应用层通过 nowLocal() 显式传入,SQL 默认值不再依赖 localtime
+db.exec(`
+  CREATE TABLE IF NOT EXISTS services (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT    UNIQUE NOT NULL,
+    description TEXT   DEFAULT '',
+    owner      TEXT    DEFAULT '',
+    created_at TEXT    DEFAULT NULL
+  )
+`);
 
-  // 时间字段一律由应用层通过 nowLocal() 显式传入,SQL 默认值不再依赖 localtime
-  db.run(`
-    CREATE TABLE IF NOT EXISTS services (
-      id         INTEGER PRIMARY KEY AUTOINCREMENT,
-      name       TEXT    UNIQUE NOT NULL,
-      description TEXT   DEFAULT '',
-      owner      TEXT    DEFAULT '',
-      created_at TEXT    DEFAULT NULL
-    )
-  `);
+db.exec(`
+  CREATE TABLE IF NOT EXISTS deployments (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    service_id  INTEGER NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+    environment TEXT    NOT NULL CHECK(environment IN ('test','staging','prod')),
+    version     TEXT    NOT NULL DEFAULT '',
+    status      TEXT    NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','success','failed')),
+    deployed_by TEXT    DEFAULT '',
+    note        TEXT    DEFAULT '',
+    started_at  TEXT    DEFAULT NULL,
+    finished_at TEXT
+  )
+`);
 
-  db.run(`
-    CREATE TABLE IF NOT EXISTS deployments (
-      id          INTEGER PRIMARY KEY AUTOINCREMENT,
-      service_id  INTEGER NOT NULL REFERENCES services(id) ON DELETE CASCADE,
-      environment TEXT    NOT NULL CHECK(environment IN ('test','staging','prod')),
-      version     TEXT    NOT NULL DEFAULT '',
-      status      TEXT    NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','success','failed')),
-      deployed_by TEXT    DEFAULT '',
-      note        TEXT    DEFAULT '',
-      started_at  TEXT    DEFAULT NULL,
-      finished_at TEXT
-    )
-  `);
-
-  save();
-})();
-
-export async function getDb(): Promise<SqlJsDatabase> {
-  await initPromise;
+/**
+ * better-sqlite3 是同步驱动,拿实例不需要等待。
+ * 保留 async 签名是刻意的:16 处调用点都写着 `await getDb()`,
+ * 维持这个契约让驱动替换对上层零改动(await 一个非 Promise 值也是合法的)。
+ */
+export async function getDb(): Promise<Db> {
   return db;
 }
 
-export function save() {
-  if (!db) return;
-  const data = db.export();
-  fs.writeFileSync(DB_PATH, Buffer.from(data));
-  // sql.js 的 db.export() 会把连接级 PRAGMA 重置为默认值,foreign_keys 会变回 0。
-  // run() 每次写入都调用 save(),若不在这里补回来,第一次写操作之后外键就永久失效:
-  // 删除服务不再级联删除其部署记录(留下孤儿数据),
-  // 且能插入指向不存在服务的部署记录。回归测试见 src/lib/db.test.ts。
-  db.run("PRAGMA foreign_keys = ON");
+/** 当前使用的数据库文件路径(WAL 的 -wal/-shm 边车文件与它同目录同前缀)。 */
+export function getDbPath(): string {
+  return DB_PATH;
 }
+
+export type SqlParam = string | number | null;
 
 export function query<T = Record<string, unknown>>(
-  db: SqlJsDatabase,
+  db: Db,
   sql: string,
-  params: (string | number)[] = []
+  params: SqlParam[] = []
 ): T[] {
-  const stmt = db.prepare(sql);
-  if (params.length) stmt.bind(params);
-  const rows: T[] = [];
-  while (stmt.step()) {
-    rows.push(stmt.getAsObject() as T);
-  }
-  stmt.free();
-  return rows;
+  return db.prepare(sql).all(params) as T[];
 }
 
-export function run(
-  db: SqlJsDatabase,
+export function run(db: Db, sql: string, params: SqlParam[] = []): void {
+  db.prepare(sql).run(params);
+}
+
+/**
+ * 写操作的返回信息。需要新插入行 id 时用它,
+ * 替代 sql.js 时期「INSERT 后 ORDER BY id DESC LIMIT 1 反查」的兜底
+ * (sql.js 的 last_insert_rowid() 经 db.exec() 读取恒为 0,拿不到真实 id)。
+ */
+export function runInfo(
+  db: Db,
   sql: string,
-  params: (string | number | null)[] = []
-) {
-  db.run(sql, params);
-  save();
+  params: SqlParam[] = []
+): Database.RunResult {
+  return db.prepare(sql).run(params);
+}
+
+/**
+ * 判断错误是否为 UNIQUE 约束冲突(API 层据此返回 409 而非 500)。
+ *
+ * 主判据是 better-sqlite3 的结构化 `code`,它由驱动按 SQLite 扩展错误码直接给出,
+ * 不受错误文案变化影响 —— 这是相对 sql.js 时期只能 `message.includes(...)` 的改进
+ * (sql.js 的错误 name 是 "Error",没有 code 字段)。
+ *
+ * 仍保留 message 兜底:错误若经过序列化/包装(跨 worker、被第三方中间件重新抛出)
+ * 会丢掉 code 与原型链,此时文案是唯一可用信号。两条判据同时存在严格优于任一单独一条。
+ */
+export function isUniqueViolation(e: unknown): boolean {
+  if (typeof e === "object" && e !== null && "code" in e) {
+    const code = (e as { code?: unknown }).code;
+    if (code === "SQLITE_CONSTRAINT_UNIQUE" || code === "SQLITE_CONSTRAINT_PRIMARYKEY") {
+      return true;
+    }
+  }
+  const msg = e instanceof Error ? e.message : String(e);
+  return msg.includes("UNIQUE constraint failed");
 }

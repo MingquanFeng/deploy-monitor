@@ -4,12 +4,15 @@ import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * 单独一个文件来测「从磁盘已有的 .db 文件恢复」这条分支。
+ * 单独一个文件来测「进程重启后从磁盘已有的 .db 文件恢复」这条路径。
  *
- * db.ts 的 DB_PATH 与实例都在模块顶层求值一次,所以要覆盖
- * `if (fs.existsSync(DB_PATH))` 分支,必须先把 DATA_DIR 指向一个已经
- * 存在 deploy.db 的目录,再 vi.resetModules() 重新 import。
+ * db.ts 的 DB_PATH 与连接都在模块顶层求值一次,所以要模拟「重启」,
+ * 必须把 DATA_DIR 指向目标目录后 vi.resetModules() 重新 import,
+ * 让模块顶层代码再跑一遍、重新打开同一个文件。
  * 放在独立文件里,避免 resetModules 影响其他测试的模块单例。
+ *
+ * better-sqlite3 直接读写磁盘文件(WAL 模式),不像 sql.js 那样需要
+ * 先 readFileSync 整个文件再喂给内存数据库,恢复是驱动天然行为。
  */
 
 const originalDataDir = process.env.DATA_DIR;
@@ -105,5 +108,76 @@ describe("db.ts 持久化与恢复", () => {
     const modB = await import("@/lib/db");
     const dbB = await modB.getDb();
     expect(modB.query(dbB, "SELECT * FROM services WHERE name = ?", ["only-in-a"])).toEqual([]);
+  });
+
+  it("启用 WAL 后在数据目录产生 -wal / -shm 边车文件", async () => {
+    // WAL 的副产物文件必须落在 DATA_DIR 内(而非散到别处),
+    // 这样 .gitignore / .dockerignore 的 data/ 规则与容器命名卷才能一并覆盖。
+    process.env.DATA_DIR = scratch;
+    const mod = await import("@/lib/db");
+    const db = await mod.getDb();
+    mod.run(db, "INSERT INTO services (name) VALUES (?)", ["wal-probe"]);
+
+    expect(mod.getDbPath()).toBe(path.join(scratch, "deploy.db"));
+    const files = fs.readdirSync(scratch).sort();
+    expect(files).toContain("deploy.db");
+    expect(files).toContain("deploy.db-wal");
+    expect(files).toContain("deploy.db-shm");
+    // 不应有任何文件逃到 DATA_DIR 之外
+    expect(files.every((f) => f.startsWith("deploy.db"))).toBe(true);
+  });
+
+  it("重启后 journal_mode 仍为 WAL(设置写在文件头,持久生效)", async () => {
+    process.env.DATA_DIR = scratch;
+    const first = await import("@/lib/db");
+    const db1 = await first.getDb();
+    expect(db1.pragma("journal_mode", { simple: true })).toBe("wal");
+    first.run(db1, "INSERT INTO services (name) VALUES (?)", ["persist-wal"]);
+
+    vi.resetModules();
+    const second = await import("@/lib/db");
+    const db2 = await second.getDb();
+    expect(db2.pragma("journal_mode", { simple: true })).toBe("wal");
+    expect(
+      second.query(db2, "SELECT name FROM services WHERE name = ?", ["persist-wal"])
+    ).toHaveLength(1);
+  });
+
+  it("能打开由 sql.js 时代写下的库文件(journal_mode=delete)并原地转为 WAL", async () => {
+    // 数据兼容性回归:旧库是标准 SQLite 文件,只是日志模式不同。
+    // 用一个非 WAL 的库文件模拟历史产物,确认新驱动读得出数据、且能就地切到 WAL。
+    process.env.DATA_DIR = scratch;
+    const dbFile = path.join(scratch, "deploy.db");
+    const { default: Database } = await import("better-sqlite3");
+    const legacy = new Database(dbFile);
+    expect(legacy.pragma("journal_mode", { simple: true })).toBe("delete");
+    legacy.exec(`CREATE TABLE services (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT UNIQUE NOT NULL,
+      description TEXT DEFAULT '',
+      owner TEXT DEFAULT '',
+      created_at TEXT DEFAULT NULL)`);
+    legacy
+      .prepare("INSERT INTO services (name, created_at) VALUES (?, ?)")
+      .run(["legacy-row", "2026-07-01 10:00:00"]);
+    legacy.close();
+
+    const mod = await import("@/lib/db");
+    const db = await mod.getDb();
+    // 旧数据读得出来
+    const rows = mod.query<{ name: string; created_at: string }>(
+      db,
+      "SELECT * FROM services WHERE name = ?",
+      ["legacy-row"]
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].created_at).toBe("2026-07-01 10:00:00");
+    // 已就地升级为 WAL
+    expect(db.pragma("journal_mode", { simple: true })).toBe("wal");
+    // 且缺失的 deployments 表被补建(CREATE TABLE IF NOT EXISTS)
+    expect(mod.query(db, "SELECT * FROM deployments")).toEqual([]);
+    // 新写入接在旧数据之后
+    const info = mod.runInfo(db, "INSERT INTO services (name) VALUES (?)", ["new-row"]);
+    expect(Number(info.lastInsertRowid)).toBe(2);
   });
 });
