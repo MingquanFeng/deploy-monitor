@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDb, nowLocal, query, run } from "@/lib/db";
+import { getDb, nowLocal, query, runInfo } from "@/lib/db";
 
 export async function GET(req: NextRequest) {
   const db = await getDb();
@@ -53,16 +53,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "服务不存在" }, { status: 404 });
   }
 
-  run(
+  const info = runInfo(
     db,
     "INSERT INTO deployments (service_id, environment, version, deployed_by, note, started_at) VALUES (?, ?, ?, ?, ?, ?)",
     [serviceIdNum, environment, version || "", deployed_by || "", note || "", nowLocal()]
   );
 
-  const rows = query(
-    db,
-    "SELECT * FROM deployments WHERE service_id = ? AND environment = ? ORDER BY id DESC LIMIT 1",
-    [serviceIdNum, environment]
-  );
+  // 直接用新插入行的 id 精确回读。此前依赖 "ORDER BY id DESC LIMIT 1" 反查,
+  // 是因为 sql.js 拿不到 last_insert_rowid();并发写入同一 service+env 时会读串行。
+  const rows = query(db, "SELECT * FROM deployments WHERE id = ?", [
+    Number(info.lastInsertRowid),
+  ]);
   return NextResponse.json(rows[0], { status: 201 });
 }

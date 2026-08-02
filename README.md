@@ -56,7 +56,7 @@ docker compose down -v
 | 框架 | Next.js 15 (App Router) |
 | 语言 | TypeScript |
 | UI | Tailwind CSS |
-| 数据库 | SQLite (sql.js WASM) |
+| 数据库 | SQLite (better-sqlite3，原生驱动 + WAL) |
 
 ## 项目结构
 
@@ -69,7 +69,7 @@ src/
 │   ├── services/              # 服务管理
 │   └── deployments/           # 部署历史 & 新建部署
 ├── lib/db.ts                  # SQLite 数据库层
-└── types/sql.js.d.ts          # 类型声明
+└── types/index.ts             # 类型声明
 ```
 
 ## API

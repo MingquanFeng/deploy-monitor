@@ -30,7 +30,8 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          # better-sqlite3@13 的 engines 要求 node >=22
+          node-version: "22"
           cache: npm
 
       - name: Install dependencies

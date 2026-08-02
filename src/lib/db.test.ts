@@ -1,14 +1,16 @@
-import initSqlJs, { Database as SqlJsDatabase } from "sql.js";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { getDb, nowLocal, query, run, save } from "@/lib/db";
+import Database from "better-sqlite3";
+import { beforeEach, describe, expect, it } from "vitest";
+import type { Db } from "@/lib/db";
+import { getDb, isUniqueViolation, nowLocal, query, run, runInfo } from "@/lib/db";
 import { TIMESTAMP_RE } from "@/test/helpers";
 
 /**
  * 方案 A:测试自己建 in-memory 数据库,直接测 query()/run() 这两个纯函数
  * (它们接受 db 参数)。生产代码零改动,也完全不碰 data/deploy.db。
  *
- * 注意 run() 内部会调用 save(),而 save() 写的是模块级单例 db、路径来自
- * process.cwd() —— 已被 src/test/setup.ts 重定向到临时目录,所以安全。
+ * 这些 :memory: 实例与模块级单例完全隔离,写入不落任何磁盘文件。
+ * 涉及单例的用例集中在末尾的 "getDb() 真实单例" 一节,
+ * 其路径已被 src/test/setup.ts 重定向到临时目录,所以安全。
  */
 
 const SCHEMA_SERVICES = `
@@ -35,22 +37,16 @@ const SCHEMA_DEPLOYMENTS = `
   )
 `;
 
-let SQL: Awaited<ReturnType<typeof initSqlJs>>;
-
-beforeAll(async () => {
-  SQL = await initSqlJs();
-});
-
 /** 建一个干净的、与生产 schema 一致的独立数据库 */
-function freshDb(): SqlJsDatabase {
-  const db = new SQL.Database();
-  db.run("PRAGMA foreign_keys = ON");
-  db.run(SCHEMA_SERVICES);
-  db.run(SCHEMA_DEPLOYMENTS);
+function freshDb(): Db {
+  const db = new Database(":memory:");
+  db.pragma("foreign_keys = ON");
+  db.exec(SCHEMA_SERVICES);
+  db.exec(SCHEMA_DEPLOYMENTS);
   return db;
 }
 
-function readPragmaFk(db: SqlJsDatabase): number {
+function readPragmaFk(db: Db): number {
   const rows = query<{ foreign_keys: number }>(db, "PRAGMA foreign_keys");
   return rows[0].foreign_keys;
 }
@@ -88,7 +84,7 @@ describe("nowLocal()", () => {
 });
 
 describe("query()", () => {
-  let db: SqlJsDatabase;
+  let db: Db;
   beforeEach(() => {
     db = freshDb();
   });
@@ -160,7 +156,7 @@ describe("query()", () => {
 });
 
 describe("run()", () => {
-  let db: SqlJsDatabase;
+  let db: Db;
   beforeEach(() => {
     db = freshDb();
   });
@@ -206,7 +202,7 @@ describe("run()", () => {
 });
 
 describe("UNIQUE 约束", () => {
-  let db: SqlJsDatabase;
+  let db: Db;
   beforeEach(() => {
     db = freshDb();
   });
@@ -258,7 +254,7 @@ describe("NOT NULL 约束", () => {
 });
 
 describe("CHECK 约束 - environment", () => {
-  let db: SqlJsDatabase;
+  let db: Db;
   let serviceId: number;
   beforeEach(() => {
     db = freshDb();
@@ -300,7 +296,7 @@ describe("CHECK 约束 - environment", () => {
 });
 
 describe("CHECK 约束 - status", () => {
-  let db: SqlJsDatabase;
+  let db: Db;
   let serviceId: number;
   beforeEach(() => {
     db = freshDb();
@@ -354,7 +350,7 @@ describe("CHECK 约束 - status", () => {
 });
 
 describe("外键与级联删除", () => {
-  let db: SqlJsDatabase;
+  let db: Db;
   beforeEach(() => {
     db = freshDb();
   });
@@ -411,17 +407,21 @@ describe("外键与级联删除", () => {
     expect(remaining[0].service_id).toBe(keepId);
   });
 
-  it("save()/export() 之后外键仍然生效(回归:export 会重置 PRAGMA)", () => {
-    // sql.js 的 db.export() 会把连接级 PRAGMA foreign_keys 重置为 0。
-    // db.ts 的 run() 每次写入都调用 save() -> export(),
-    // 若不重新施加 PRAGMA,第一次写入之后外键就永久失效,
-    // 删服务会留下孤儿部署记录。这条测试守住该回归。
+  it("连续多次写入之后外键仍然生效(回归:PRAGMA 曾被写操作重置)", () => {
+    // 历史背景:sql.js 时期 run() 每次写入都要 db.export() 全库序列化落盘,
+    // 而 export() 会把连接级 PRAGMA foreign_keys 重置为 0 —— 第一次写入之后
+    // 外键就永久失效,删服务会留下孤儿部署记录。
+    // better-sqlite3 直接写文件、不存在 export 环节,PRAGMA 建连接时设一次即终身有效。
+    // 断言的语义不变:写操作不能把外键关掉。
     run(db, "INSERT INTO services (name) VALUES (?)", ["svc"]);
     const id = query<{ id: number }>(db, "SELECT id FROM services")[0].id;
     run(db, "INSERT INTO deployments (service_id, environment) VALUES (?, ?)", [id, "prod"]);
 
-    db.export(); // 模拟 save() 内部动作
-    db.run("PRAGMA foreign_keys = ON"); // db.ts 里 save() 应做的补偿
+    // 多写几次,确认 PRAGMA 不被写操作侵蚀
+    for (let i = 0; i < 5; i++) {
+      run(db, "INSERT INTO services (name) VALUES (?)", [`filler-${i}`]);
+      expect(readPragmaFk(db)).toBe(1);
+    }
 
     expect(readPragmaFk(db)).toBe(1);
     run(db, "DELETE FROM services WHERE id = ?", [id]);
@@ -429,7 +429,137 @@ describe("外键与级联删除", () => {
   });
 });
 
-describe("getDb() / save() 真实单例", () => {
+describe("runInfo() / lastInsertRowid", () => {
+  let db: Db;
+  beforeEach(() => {
+    db = freshDb();
+  });
+
+  it("返回新插入行的真实 id", () => {
+    // sql.js 时期 last_insert_rowid() 经 db.exec() 读取恒为 0,
+    // 迫使 API 层用 "ORDER BY id DESC LIMIT 1" 反查。这里守住新能力。
+    const info = runInfo(db, "INSERT INTO services (name) VALUES (?)", ["a"]);
+    expect(Number(info.lastInsertRowid)).toBe(1);
+    expect(info.changes).toBe(1);
+  });
+
+  it("多次插入时 id 递增且与实际落库行一致", () => {
+    const ids = ["a", "b", "c"].map(
+      (n) => Number(runInfo(db, "INSERT INTO services (name) VALUES (?)", [n]).lastInsertRowid)
+    );
+    expect(ids).toEqual([1, 2, 3]);
+    const stored = query<{ id: number }>(db, "SELECT id FROM services ORDER BY id").map(
+      (r) => r.id
+    );
+    expect(stored).toEqual(ids);
+  });
+
+  it("UPDATE 返回受影响行数", () => {
+    run(db, "INSERT INTO services (name) VALUES (?)", ["a"]);
+    run(db, "INSERT INTO services (name) VALUES (?)", ["b"]);
+    const info = runInfo(db, "UPDATE services SET owner = ?", ["everyone"]);
+    expect(info.changes).toBe(2);
+  });
+
+  it("插入部署记录时能直接精确回读该行", () => {
+    const sid = Number(
+      runInfo(db, "INSERT INTO services (name) VALUES (?)", ["svc"]).lastInsertRowid
+    );
+    const did = Number(
+      runInfo(db, "INSERT INTO deployments (service_id, environment, version) VALUES (?, ?, ?)", [
+        sid,
+        "prod",
+        "v9",
+      ]).lastInsertRowid
+    );
+    const row = query<{ id: number; version: string }>(
+      db,
+      "SELECT * FROM deployments WHERE id = ?",
+      [did]
+    );
+    expect(row).toHaveLength(1);
+    expect(row[0].version).toBe("v9");
+  });
+});
+
+describe("isUniqueViolation()", () => {
+  let db: Db;
+  beforeEach(() => {
+    db = freshDb();
+  });
+
+  it("识别真实的 UNIQUE 冲突错误", () => {
+    run(db, "INSERT INTO services (name) VALUES (?)", ["dup"]);
+    let caught: unknown;
+    try {
+      run(db, "INSERT INTO services (name) VALUES (?)", ["dup"]);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeDefined();
+    expect(isUniqueViolation(caught)).toBe(true);
+  });
+
+  it("UNIQUE 冲突错误带结构化 code(不必再靠文案判断)", () => {
+    run(db, "INSERT INTO services (name) VALUES (?)", ["dup"]);
+    let caught: unknown;
+    try {
+      run(db, "INSERT INTO services (name) VALUES (?)", ["dup"]);
+    } catch (e) {
+      caught = e;
+    }
+    expect((caught as { code?: string }).code).toBe("SQLITE_CONSTRAINT_UNIQUE");
+    expect((caught as Error).name).toBe("SqliteError");
+  });
+
+  it.each([
+    ["NOT NULL", () => run(db, "INSERT INTO services (name) VALUES (?)", [null])],
+    ["no such table", () => run(db, "INSERT INTO nope (x) VALUES (?)", [1])],
+  ])("不把 %s 错误误判为 UNIQUE 冲突", (_label, fn) => {
+    let caught: unknown;
+    try {
+      fn();
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeDefined();
+    expect(isUniqueViolation(caught)).toBe(false);
+  });
+
+  it("CHECK 与 FOREIGN KEY 错误不算 UNIQUE 冲突", () => {
+    const sid = Number(
+      runInfo(db, "INSERT INTO services (name) VALUES (?)", ["svc"]).lastInsertRowid
+    );
+    for (const fn of [
+      () => run(db, "INSERT INTO deployments (service_id, environment) VALUES (?, ?)", [sid, "x"]),
+      () => run(db, "INSERT INTO deployments (service_id, environment) VALUES (?, ?)", [999, "prod"]),
+    ]) {
+      let caught: unknown;
+      try {
+        fn();
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeDefined();
+      expect(isUniqueViolation(caught)).toBe(false);
+    }
+  });
+
+  it("错误被序列化丢掉 code 后,仍能靠文案兜底识别", () => {
+    // 跨 worker 传递 / 被中间件重新包装的错误会丢掉 code 与原型链,
+    // 此时文案是唯一信号 —— 两条判据并存的意义就在这里。
+    expect(isUniqueViolation(new Error("UNIQUE constraint failed: services.name"))).toBe(true);
+    expect(isUniqueViolation({ message: "UNIQUE constraint failed: services.name" })).toBe(false);
+  });
+
+  it("非错误输入不会抛异常", () => {
+    for (const v of [null, undefined, 0, "", "boom", {}, []]) {
+      expect(isUniqueViolation(v)).toBe(false);
+    }
+  });
+});
+
+describe("getDb() 真实单例", () => {
   it("getDb() 返回已建好表的实例,且多次调用是同一个", async () => {
     const a = await getDb();
     const b = await getDb();
@@ -439,16 +569,23 @@ describe("getDb() / save() 真实单例", () => {
     expect(query(a, "SELECT * FROM deployments")).toBeInstanceOf(Array);
   });
 
-  it("单例数据库开启了外键(save 之后也保持)", async () => {
+  it("单例数据库开启了外键(写入之后也保持)", async () => {
     const db = await getDb();
-    save();
+    run(db, "INSERT INTO services (name) VALUES (?)", ["fk-probe"]);
     expect(readPragmaFk(db)).toBe(1);
+  });
+
+  it("单例数据库启用了 WAL 日志模式", async () => {
+    // WAL 是迁移到 better-sqlite3 的核心收益:写入只追加 -wal,
+    // 不再像 sql.js 那样每次写入重写整个数据库文件。
+    const db = await getDb();
+    expect(db.pragma("journal_mode", { simple: true })).toBe("wal");
   });
 
   it("经由单例写入的数据可被读回", async () => {
     const db = await getDb();
-    db.run("DELETE FROM deployments");
-    db.run("DELETE FROM services");
+    db.exec("DELETE FROM deployments");
+    db.exec("DELETE FROM services");
     run(db, "INSERT INTO services (name, created_at) VALUES (?, ?)", [
       "singleton-svc",
       nowLocal(),
@@ -462,7 +599,7 @@ describe("getDb() / save() 真实单例", () => {
     expect(rows[0].created_at).toMatch(TIMESTAMP_RE);
   });
 
-  it("save() 把数据落到临时目录,而非仓库里的 data/deploy.db", async () => {
+  it("写入落到临时目录,而非仓库里的 data/deploy.db", async () => {
     const fs = await import("fs");
     const path = await import("path");
     const db = await getDb();

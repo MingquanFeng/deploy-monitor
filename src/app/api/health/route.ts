@@ -15,7 +15,7 @@ export async function GET() {
   let database: CheckStatus = "ok";
   try {
     const db = await getDb();
-    // 轻量探针:只验证 sql.js 已初始化且能执行语句,不读业务表、不产生写入
+    // 轻量探针:只验证数据库连接可用且能执行语句,不读业务表、不产生写入
     query(db, "SELECT 1");
   } catch {
     database = "error";
