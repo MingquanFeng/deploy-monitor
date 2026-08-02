@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, nowLocal, query, run } from "@/lib/db";
+import { publish } from "@/lib/events";
 
 export async function PUT(
   req: NextRequest,
@@ -38,5 +39,11 @@ export async function PUT(
   );
 
   const updated = query(db, "SELECT * FROM deployments WHERE id = ?", [idNum]);
+  // service_id 从库里读，而非从请求体 —— PUT 只接受 status 字段，服务归属不可变
+  publish({
+    type: "deployment.updated",
+    deploymentId: idNum,
+    serviceId: updated[0].service_id as number,
+  });
   return NextResponse.json(updated[0]);
 }

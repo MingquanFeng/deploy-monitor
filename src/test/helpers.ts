@@ -1,6 +1,8 @@
 import { NextRequest } from "next/server";
 import type { Db } from "@/lib/db";
 import { getDb, runInfo } from "@/lib/db";
+import type { ChangeEvent } from "@/lib/events";
+import { subscribe } from "@/lib/events";
 
 /**
  * 构造一个带 JSON body 的 NextRequest。
@@ -115,3 +117,24 @@ export async function seedDeployment(
  * 断言时间戳是 nowLocal() 的格式:YYYY-MM-DD HH:MM:SS
  */
 export const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+
+/**
+ * 订阅变更事件总线并把收到的事件收进数组,用于断言「写入成功后确实广播了」。
+ *
+ * 用法(务必在 finally / afterEach 里 stop(),否则总线里会残留 listener):
+ *   const cap = captureEvents();
+ *   try {
+ *     await POST(...);
+ *     expect(cap.events).toEqual([{ type: "service.created", serviceId: 1 }]);
+ *   } finally {
+ *     cap.stop();
+ *   }
+ */
+export function captureEvents(): {
+  events: ChangeEvent[];
+  stop: () => void;
+} {
+  const events: ChangeEvent[] = [];
+  const unsubscribe = subscribe((e) => events.push(e));
+  return { events, stop: unsubscribe };
+}

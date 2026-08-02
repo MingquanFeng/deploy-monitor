@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, isUniqueViolation, nowLocal, query, run } from "@/lib/db";
+import { publish } from "@/lib/events";
 
 export async function GET() {
   const db = await getDb();
@@ -27,6 +28,9 @@ export async function POST(req: NextRequest) {
       nowLocal(),
     ]);
     const rows = query(db, "SELECT * FROM services WHERE name = ?", [name]);
+    // 落库成功后才广播。publish() 契约上不抛错（见 src/lib/events.ts），
+    // 所以这里不包 try/catch —— 推送失败不该把一次成功的写变成 500。
+    publish({ type: "service.created", serviceId: rows[0].id as number });
     return NextResponse.json(rows[0], { status: 201 });
   } catch (e: unknown) {
     if (isUniqueViolation(e)) {

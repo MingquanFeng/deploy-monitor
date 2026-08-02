@@ -7,6 +7,7 @@ import {
   resetDb,
   seedService,
   TIMESTAMP_RE,
+  captureEvents,
 } from "@/test/helpers";
 
 const URL = "http://localhost:3000/api/webhook/deploy";
@@ -370,5 +371,117 @@ describe("POST /api/webhook/deploy — 成功写入", () => {
       { service_id: a, environment: "prod" },
       { service_id: b, environment: "test" },
     ]);
+  });
+});
+
+describe("POST /api/webhook/deploy — 变更事件广播", () => {
+  it("201 后广播 deployment.created（与人工录入同一事件类型）", async () => {
+    const serviceId = await seedService({ name: "wh-evt" });
+    const cap = captureEvents();
+    try {
+      const body = await (
+        await POST(authed({ service: "wh-evt", environment: "prod", version: "v1" }))
+      ).json();
+      expect(cap.events).toEqual([
+        { type: "deployment.created", deploymentId: body.id, serviceId },
+      ]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("503（未配置 token）不广播", async () => {
+    vi.stubEnv("WEBHOOK_TOKEN", "");
+    const cap = captureEvents();
+    try {
+      const res = await POST(authed({ service: "x", environment: "prod" }));
+      expect(res.status).toBe(503);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("401（鉴权失败）不广播", async () => {
+    await seedService({ name: "wh-401" });
+    const cap = captureEvents();
+    try {
+      const res = await POST(
+        jsonRequest("POST", URL, { service: "wh-401", environment: "prod" }, {
+          authorization: "Bearer wrong",
+        })
+      );
+      expect(res.status).toBe(401);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("400（body 非法 JSON）不广播", async () => {
+    const cap = captureEvents();
+    try {
+      const res = await POST(
+        malformedRequest("POST", URL, { authorization: `Bearer ${TOKEN}` })
+      );
+      expect(res.status).toBe(400);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("400（非法 environment）不广播", async () => {
+    await seedService({ name: "wh-badenv" });
+    const cap = captureEvents();
+    try {
+      const res = await POST(authed({ service: "wh-badenv", environment: "qa" }));
+      expect(res.status).toBe(400);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("400（非法 status）不广播", async () => {
+    await seedService({ name: "wh-badstatus" });
+    const cap = captureEvents();
+    try {
+      const res = await POST(
+        authed({ service: "wh-badstatus", environment: "prod", status: "canceled" })
+      );
+      expect(res.status).toBe(400);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("404（服务不存在）不广播", async () => {
+    const cap = captureEvents();
+    try {
+      const res = await POST(authed({ service: "no-such-svc", environment: "prod" }));
+      expect(res.status).toBe(404);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("连续多次上报按顺序广播，deploymentId 各不相同", async () => {
+    const serviceId = await seedService({ name: "wh-multi" });
+    const cap = captureEvents();
+    try {
+      await POST(authed({ service: "wh-multi", environment: "test" }));
+      await POST(authed({ service: "wh-multi", environment: "prod" }));
+      expect(cap.events).toHaveLength(2);
+      const ids = cap.events.map((e) => (e as { deploymentId: number }).deploymentId);
+      expect(new Set(ids).size).toBe(2);
+      expect(cap.events.every((e) => (e as { serviceId: number }).serviceId === serviceId)).toBe(
+        true
+      );
+    } finally {
+      cap.stop();
+    }
   });
 });

@@ -9,6 +9,7 @@ import {
   seedDeployment,
   seedService,
   TIMESTAMP_RE,
+  captureEvents,
 } from "@/test/helpers";
 
 const URL_BASE = "http://localhost:3000/api/deployments";
@@ -202,5 +203,99 @@ describe("PUT /api/deployments/[id]", () => {
       await PUT(jsonRequest("PUT", URL_BASE, { status: "failed" }), routeCtx(id))
     ).json();
     expect(body.status).toBe("failed");
+  });
+});
+
+describe("PUT /api/deployments/[id] — 变更事件广播", () => {
+  it("200 后广播 deployment.updated，带 deploymentId 与 serviceId", async () => {
+    const serviceId = await seedService({ name: "evt-dep-upd" });
+    const id = await seedDeployment(serviceId, { environment: "prod", status: "pending" });
+    const cap = captureEvents();
+    try {
+      const res = await PUT(jsonRequest("PUT", URL_BASE, { status: "success" }), routeCtx(id));
+      expect(res.status).toBe(200);
+      expect(cap.events).toEqual([
+        { type: "deployment.updated", deploymentId: id, serviceId },
+      ]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("事件里的 serviceId 从库中读取（不来自请求体）", async () => {
+    const serviceId = await seedService({ name: "evt-dep-svcid" });
+    const id = await seedDeployment(serviceId, { environment: "test", status: "pending" });
+    const cap = captureEvents();
+    try {
+      // 请求体里塞一个假的 service_id，事件必须无视它
+      await PUT(
+        jsonRequest("PUT", URL_BASE, { status: "failed", service_id: 99999 }),
+        routeCtx(id)
+      );
+      expect(cap.events).toEqual([
+        { type: "deployment.updated", deploymentId: id, serviceId },
+      ]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("404 不广播", async () => {
+    const cap = captureEvents();
+    try {
+      const res = await PUT(jsonRequest("PUT", URL_BASE, { status: "success" }), routeCtx(9999));
+      expect(res.status).toBe(404);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("400（无效状态）不广播", async () => {
+    const id = await seedPending();
+    const cap = captureEvents();
+    try {
+      const res = await PUT(jsonRequest("PUT", URL_BASE, { status: "canceled" }), routeCtx(id));
+      expect(res.status).toBe(400);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("400（无效 id）不广播", async () => {
+    const cap = captureEvents();
+    try {
+      const res = await PUT(jsonRequest("PUT", URL_BASE, { status: "success" }), routeCtx("abc"));
+      expect(res.status).toBe(400);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("400（body 非法 JSON）不广播", async () => {
+    const id = await seedPending();
+    const cap = captureEvents();
+    try {
+      const res = await PUT(malformedRequest("PUT", URL_BASE), routeCtx(id));
+      expect(res.status).toBe(400);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("连续两次更新广播两条事件", async () => {
+    const id = await seedPending();
+    const cap = captureEvents();
+    try {
+      await PUT(jsonRequest("PUT", URL_BASE, { status: "success" }), routeCtx(id));
+      await PUT(jsonRequest("PUT", URL_BASE, { status: "failed" }), routeCtx(id));
+      expect(cap.events).toHaveLength(2);
+      expect(cap.events.every((e) => e.type === "deployment.updated")).toBe(true);
+    } finally {
+      cap.stop();
+    }
   });
 });
