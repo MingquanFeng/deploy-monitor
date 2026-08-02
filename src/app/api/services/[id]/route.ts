@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDb, query, run } from "@/lib/db";
+import { getDb, isUniqueViolation, query, run } from "@/lib/db";
 
 export async function GET(
   _req: NextRequest,
@@ -46,10 +46,10 @@ export async function PUT(
       [name ?? null, description ?? null, owner ?? null, idNum]
     );
   } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (msg.includes("UNIQUE constraint failed")) {
+    if (isUniqueViolation(e)) {
       return NextResponse.json({ error: "服务名已存在" }, { status: 409 });
     }
+    const msg = e instanceof Error ? e.message : String(e);
     return NextResponse.json({ error: msg }, { status: 500 });
   }
   const updated = query(db, "SELECT * FROM services WHERE id = ?", [idNum]);

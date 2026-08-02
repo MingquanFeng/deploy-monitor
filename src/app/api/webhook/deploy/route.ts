@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getDb, nowLocal, query, run } from "@/lib/db";
+import { getDb, nowLocal, query, runInfo } from "@/lib/db";
 
 function unauthorized(msg: string) {
   return NextResponse.json({ error: msg }, { status: 401 });
@@ -53,7 +53,7 @@ export async function POST(req: NextRequest) {
   const startedAt = nowLocal();
   const finishedAt = status === "success" || status === "failed" ? startedAt : null;
 
-  run(
+  const info = runInfo(
     db,
     `INSERT INTO deployments
        (service_id, environment, version, status, deployed_by, note, started_at, finished_at)
@@ -61,10 +61,11 @@ export async function POST(req: NextRequest) {
     [serviceId, environment, version, statusStr, deployedBy, note, startedAt, finishedAt]
   );
 
-  const rows = query(
-    db,
-    "SELECT * FROM deployments WHERE service_id = ? AND environment = ? ORDER BY id DESC LIMIT 1",
-    [serviceId, environment]
-  );
+  // 与 POST /api/deployments 同理:用 lastInsertRowid 精确回读,
+  // 而非 "ORDER BY id DESC LIMIT 1" —— webhook 是并发最高的写入入口,
+  // 同一 service+env 的并发推送在旧写法下可能互相读到对方的行。
+  const rows = query(db, "SELECT * FROM deployments WHERE id = ?", [
+    Number(info.lastInsertRowid),
+  ]);
   return NextResponse.json(rows[0], { status: 201 });
 }

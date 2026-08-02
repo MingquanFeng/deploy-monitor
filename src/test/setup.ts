@@ -19,7 +19,7 @@ import { afterAll } from "vitest";
  *
  * 为什么每个文件一个目录:
  *   vitest 配置了 pool:"forks" + isolate:true,每个测试文件跑在独立子进程里,
- *   于是每个文件拿到自己的 DATA_DIR、自己的 sql.js 单例、自己的数据库文件。
+ *   于是每个文件拿到自己的 DATA_DIR、自己的数据库连接、自己的数据库文件。
  *   并行执行时测试之间不共享任何状态。
  */
 

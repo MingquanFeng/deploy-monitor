@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
-import type { Database as SqlJsDatabase } from "sql.js";
-import { getDb, query, run } from "@/lib/db";
+import type { Db } from "@/lib/db";
+import { getDb, runInfo } from "@/lib/db";
 
 /**
  * 构造一个带 JSON body 的 NextRequest。
@@ -53,11 +53,11 @@ export function routeCtx(id: string | number) {
  * 把数据库清空并重置自增序列,让每个测试从 id=1 开始。
  * 在 beforeEach 里调用 => 测试之间零共享状态,顺序无关。
  */
-export async function resetDb(): Promise<SqlJsDatabase> {
+export async function resetDb(): Promise<Db> {
   const db = await getDb();
-  db.run("DELETE FROM deployments");
-  db.run("DELETE FROM services");
-  db.run("DELETE FROM sqlite_sequence WHERE name IN ('services','deployments')");
+  db.exec("DELETE FROM deployments");
+  db.exec("DELETE FROM services");
+  db.exec("DELETE FROM sqlite_sequence WHERE name IN ('services','deployments')");
   return db;
 }
 
@@ -70,12 +70,12 @@ export async function seedService(
 ): Promise<number> {
   const db = await getDb();
   const name = overrides.name ?? `svc-${Math.random().toString(36).slice(2, 10)}`;
-  run(
+  const info = runInfo(
     db,
     "INSERT INTO services (name, description, owner, created_at) VALUES (?, ?, ?, ?)",
     [name, overrides.description ?? "", overrides.owner ?? "", "2026-01-01 00:00:00"]
   );
-  return query<{ id: number }>(db, "SELECT id FROM services WHERE name = ?", [name])[0].id;
+  return Number(info.lastInsertRowid);
 }
 
 /**
@@ -93,7 +93,7 @@ export async function seedDeployment(
   } = {}
 ): Promise<number> {
   const db = await getDb();
-  run(
+  const info = runInfo(
     db,
     `INSERT INTO deployments
        (service_id, environment, version, status, deployed_by, note, started_at)
@@ -108,10 +108,7 @@ export async function seedDeployment(
       overrides.started_at ?? "2026-01-01 00:00:00",
     ]
   );
-  return query<{ id: number }>(
-    db,
-    "SELECT id FROM deployments ORDER BY id DESC LIMIT 1"
-  )[0].id;
+  return Number(info.lastInsertRowid);
 }
 
 /**

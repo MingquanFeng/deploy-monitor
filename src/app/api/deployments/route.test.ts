@@ -101,7 +101,7 @@ describe("GET /api/deployments", () => {
     const id = await seedService({ name: "gone" });
     await seedDeployment(id, { environment: "prod" });
     const db = await getDb();
-    db.run("DELETE FROM services WHERE id = ?", [id]);
+    db.prepare("DELETE FROM services WHERE id = ?").run([id]);
     const body = await (await GET(plainRequest("GET", URL_BASE))).json();
     expect(body).toEqual([]);
   });

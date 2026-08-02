@@ -5,7 +5,7 @@ import { resetDb, TIMESTAMP_RE } from "@/test/helpers";
 
 /**
  * 把 @/lib/db 换成「默认转发到真实实现」的可 spy 版本:
- * 正常路径仍然打真实的 sql.js 数据库(和其他测试一致),
+ * 正常路径仍然打真实的数据库(和其他测试一致),
  * 只有需要制造故障的用例才临时把 getDb 改成 reject。
  * 直接 vi.spyOn(db, "getDb") 对 ESM 命名空间无效,必须走 vi.mock。
  */

@@ -176,8 +176,8 @@ describe("POST /api/services", () => {
     // 覆盖 catch 里的通用分支:不是 UNIQUE 冲突时应返回 500 而不是崩溃。
     // 通过临时删表制造一个真实的 SQL 错误(no such table)。
     const db = await getDb();
-    db.run("DROP TABLE deployments");
-    db.run("DROP TABLE services");
+    db.exec("DROP TABLE deployments");
+    db.exec("DROP TABLE services");
     try {
       const res = await POST(jsonRequest("POST", URL_BASE, { name: "boom" }));
       expect(res.status).toBe(500);
@@ -186,13 +186,13 @@ describe("POST /api/services", () => {
     } finally {
       // 复原 schema,避免影响 afterEach 之后的其他测试
       // (本文件每个测试前都会 resetDb,resetDb 依赖表存在)
-      db.run(`CREATE TABLE IF NOT EXISTS services (
+      db.exec(`CREATE TABLE IF NOT EXISTS services (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT UNIQUE NOT NULL,
         description TEXT DEFAULT '',
         owner TEXT DEFAULT '',
         created_at TEXT DEFAULT NULL)`);
-      db.run(`CREATE TABLE IF NOT EXISTS deployments (
+      db.exec(`CREATE TABLE IF NOT EXISTS deployments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         service_id INTEGER NOT NULL REFERENCES services(id) ON DELETE CASCADE,
         environment TEXT NOT NULL CHECK(environment IN ('test','staging','prod')),

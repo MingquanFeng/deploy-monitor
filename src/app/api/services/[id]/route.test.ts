@@ -180,8 +180,9 @@ describe("DELETE /api/services/[id]", () => {
     const res = await DELETE(plainRequest("DELETE", URL_BASE), routeCtx(id));
     expect(res.status).toBe(200);
 
-    // 回归守卫:save()/export() 曾把 PRAGMA foreign_keys 重置为 0,
-    // 导致这里留下孤儿部署记录。
+    // 回归守卫:sql.js 时期 save()/export() 会把 PRAGMA foreign_keys 重置为 0,
+    // 导致这里留下孤儿部署记录。换驱动后 PRAGMA 是连接级一次性设置,
+    // 但级联行为本身仍必须成立,这条断言继续守着。
     expect(query(db, "SELECT * FROM deployments")).toEqual([]);
   });
 
