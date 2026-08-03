@@ -71,6 +71,18 @@ const rows = query(db, "SELECT * FROM deployments WHERE id = ?", [Number(info.la
 
 外键级联删除：删除服务会同时删除其所有部署记录。
 
+### 部署失败通知 (`src/lib/notify.ts`)
+
+`pending → failed` 迁移时通过 Server酱 推送至微信。配置 `SERVERCHAN_KEY`，未配置静默跳过（不报错、不打日志）。
+
+判据是状态迁移，不是当前状态。`DeploymentChangeEvent` 带 `status` / `previousStatus` 两个可选字段，前态由 `PUT /api/deployments/[id]` 在 `UPDATE` **之前**读出 —— `publish()` 发生在 UPDATE 之后，那时库里已经查不到改动前的值。
+
+注册方式：`src/lib/notify.ts` 模块顶层自注册，由 `PUT /api/deployments/[id]` 用副作用 import 拉进来。不要改成 `src/instrumentation.ts` —— Next 15.1 下 webpack 把 instrumentation打进独立 chunk，进程里出现两份 `events.ts` 实例，通知静默失效且无报错；附带的 Edge runtime 编译问题会让全部路由返回 500。详见 CLAUDE.md。
+
+`console.warn` 而非抛错：链路起点是一次已成功落库的 PUT，通知失败不能影响那个 200。`send()` 内部自己收干净所有异常。
+
+`SCF_API_BASE` 仅用于端到端验证（指向假服务器），生产不设置。验证脚本 `scripts/verify-notify.mjs` 已同步更新。
+
 ### 页面路由
 
 | 路径 | 类型 | 说明 |

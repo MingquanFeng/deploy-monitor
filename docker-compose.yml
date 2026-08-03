@@ -9,6 +9,8 @@ services:
       # 从同目录 .env 读取（未设置时为空，webhook 端点会拒绝接入）
       WEBHOOK_TOKEN: ${WEBHOOK_TOKEN:-}
       DATA_DIR: /app/data
+      # Server酱 微信推送，未配置时通知功能静默关闭，不影响其他功能
+      SERVERCHAN_KEY: ${SERVERCHAN_KEY:-}
     volumes:
       # 命名卷持久化 SQLite 文件，容器重建数据不丢
       - deploy-monitor-data:/app/data

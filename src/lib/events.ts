@@ -29,11 +29,31 @@ export type ServiceChangeEvent = {
   serviceId: number;
 };
 
-/** 部署记录维度的变更。带上 serviceId，客户端可只刷新受影响的服务卡片。 */
+/** 部署状态。与 deployments.status 的 CHECK 约束一致。 */
+export type DeploymentStatus = "pending" | "success" | "failed";
+
+/**
+ * 部署记录维度的变更。带上 serviceId，客户端可只刷新受影响的服务卡片。
+ *
+ * `status` / `previousStatus` 只在 `deployment.updated` 上出现，用于让订阅者判定
+ * **状态迁移**而非仅仅「状态是什么」。这两个字段不能省、也不能让订阅者自己去查库：
+ * publish() 发生在 UPDATE 之后，那时前态已经被覆盖，库里再也读不到
+ * 「这次改动之前是什么」。失败通知要的正是 pending → failed 这一次跃变
+ * （见 src/lib/notify.ts）—— 少了前态就只能退化成「只要是 failed 就推」，
+ * 于是重复标记失败会重复轰炸。
+ *
+ * 为什么是可选而不是拆成两个必填的事件类型：客户端的 parseChangeEvent
+ * （src/lib/changeStream.ts）逐字段校验后重建对象，字段变必填就得连带写一套
+ * 状态值的校验分支 —— 而浏览器端根本不消费这两个字段，它只用 serviceId 决定
+ * 刷不刷。可选让客户端零改动，代价是「发布方漏填」不会被编译器拦住；
+ * 考虑到全项目只有 PUT /api/deployments/[id] 一处能产生状态迁移，这个代价可以接受。
+ */
 export type DeploymentChangeEvent = {
   type: "deployment.created" | "deployment.updated";
   deploymentId: number;
   serviceId: number;
+  status?: DeploymentStatus;
+  previousStatus?: DeploymentStatus;
 };
 
 export type ChangeEvent = ServiceChangeEvent | DeploymentChangeEvent;

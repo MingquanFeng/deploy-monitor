@@ -131,6 +131,37 @@ curl -X POST http://your-host/api/webhook/deploy \
 - `status`（可选，默认 `success`）：`pending` / `success` / `failed`
 - `version` / `deployed_by` / `note`：可选
 
+### 部署失败通知（Server酱）
+
+配置以下环境变量后，部署状态从**进行中变为失败**时自动推送至微信：
+
+```bash
+# 登入 https://sct.ftqq.com/ 获取 SendKey
+SERVERCHAN_KEY=your-sendkey-here
+```
+
+未配置时通知功能**静默关闭**，不影响其他功能、不打日志、不报错 —— 这是本地开发与未接入推送的部署的默认状态。
+
+推送内容示例：
+
+```
+[生产] user-service 部署失败
+
+服务：user-service
+环境：生产
+版本：v2.0.1
+部署人：bob
+时间：2026-08-03 10:30:00
+```
+
+生产环境的显著性体现在标题的 `[生产]` 前缀，通知列表预览行里第一行就能看出严重性。
+
+**只在 `pending → failed` 这一次状态迁移时推送一次。** 重复把同一条记录标记为失败（`failed → failed`）不会重复推送；`success → failed` 视为人工纠正记录，也不推送。判定实现见 `isNewFailure()`（`src/lib/notify.ts`）。
+
+通知复用 SSE 的进程内事件总线（`src/lib/events.ts`）：订阅一个 listener 监听 `deployment.updated`，而不是在各个写入点分别调用推送。推送失败（网络异常、Server酱返回错误）只记 `console.warn`，绝不影响已经成功落库的那次请求。
+
+> 多副本部署时，事件总线是进程内的，通知由处理该写请求的实例推送 —— 恰好只推一次。但若按 `src/lib/events.ts` 的建议改造成 Redis Pub/Sub 跨实例广播，必须额外处理跨实例去重。
+
 ## License
 
 [MIT](LICENSE)
