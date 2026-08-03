@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { useChangeStream } from "@/hooks/useChangeStream";
 import { affectsDeploymentList } from "@/lib/changeStream";
@@ -118,7 +119,11 @@ export default function DeploymentsPage() {
           <tbody>
             {filtered.map((d) => (
               <tr key={d.id} className="border-t border-gray-100 hover:bg-gray-50">
-                <td className={`${CELL_CLASS} font-medium`}>{d.service_name}</td>
+                <td className={`${CELL_CLASS} font-medium`}>
+                  <Link href={`/deployments/${d.id}`} className="text-blue-600 hover:underline">
+                    {d.service_name}
+                  </Link>
+                </td>
                 <td className={`${CELL_CLASS} font-mono`}>{d.version || "-"}</td>
                 <td className={CELL_CLASS}>
                   <span

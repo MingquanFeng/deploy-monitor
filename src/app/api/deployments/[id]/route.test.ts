@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { getDb, query } from "@/lib/db";
-import { PUT } from "@/app/api/deployments/[id]/route";
+import { GET, PUT } from "@/app/api/deployments/[id]/route";
 import {
   jsonRequest,
   malformedRequest,
+  plainRequest,
   resetDb,
   routeCtx,
   seedDeployment,
@@ -339,5 +340,191 @@ describe("PUT /api/deployments/[id] — 变更事件广播", () => {
     } finally {
       cap.stop();
     }
+  });
+});
+
+describe("GET /api/deployments/[id]", () => {
+  it("200 返回正确字段", async () => {
+    const serviceId = await seedService({ name: "svc-get" });
+    const id = await seedDeployment(serviceId, {
+      environment: "prod",
+      version: "v2.0.0",
+      deployed_by: "alice",
+    });
+    const res = await GET(plainRequest("GET", `${URL_BASE}/${id}`), routeCtx(id));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.service_name).toBe("svc-get");
+    expect(body).toMatchObject({
+      id,
+      service_id: serviceId,
+      environment: "prod",
+      version: "v2.0.0",
+      deployed_by: "alice",
+    });
+  });
+
+  it("200 字段类型完整", async () => {
+    const serviceId = await seedService({ name: "svc-get" });
+    const id = await seedDeployment(serviceId, {
+      status: "pending",
+      started_at: "2026-06-01 12:00:00",
+    });
+    const body = await (await GET(plainRequest("GET", `${URL_BASE}/${id}`), routeCtx(id))).json();
+    expect(body).toEqual({
+      id,
+      service_id: serviceId,
+      service_name: "svc-get",
+      environment: "prod",
+      version: "v1.0.0",
+      status: "pending",
+      deployed_by: "",
+      note: "",
+      started_at: "2026-06-01 12:00:00",
+      finished_at: null,
+    });
+  });
+
+  it("200 终态记录 finished_at 匹配 TIMESTAMP_RE", async () => {
+    const serviceId = await seedService({ name: "get-finished-svc" });
+    const id = await seedDeployment(serviceId, {
+      status: "success",
+      started_at: "2026-06-01 10:00:00",
+    });
+    const db = await getDb();
+    db.prepare("UPDATE deployments SET finished_at = ? WHERE id = ?").run([
+      "2026-06-01 10:05:00",
+      id,
+    ]);
+    const body = await (await GET(plainRequest("GET", `${URL_BASE}/${id}`), routeCtx(id))).json();
+    expect(body.finished_at).toMatch(TIMESTAMP_RE);
+  });
+
+  it("200 待处理记录 finished_at 为 null", async () => {
+    const serviceId = await seedService({ name: "get-pending-svc" });
+    const id = await seedDeployment(serviceId, { status: "pending" });
+    const body = await (await GET(plainRequest("GET", `${URL_BASE}/${id}`), routeCtx(id))).json();
+    expect(body.finished_at).toBeNull();
+  });
+
+  it("JOIN 语义：服务改名后 GET 返回新名", async () => {
+    const serviceId = await seedService({ name: "svc-old" });
+    const id = await seedDeployment(serviceId, { environment: "prod" });
+    const db = await getDb();
+    db.prepare("UPDATE services SET name = ? WHERE id = ?").run(["svc-new", serviceId]);
+    const body = await (await GET(plainRequest("GET", `${URL_BASE}/${id}`), routeCtx(id))).json();
+    expect(body.service_name).toBe("svc-new");
+  });
+
+  it("JOIN 语义：服务被删后返回 404（INNER JOIN）", async () => {
+    const serviceId = await seedService({ name: "get-orphan-svc" });
+    const id = await seedDeployment(serviceId, { environment: "staging" });
+    const db = await getDb();
+    db.prepare("DELETE FROM services WHERE id = ?").run([serviceId]);
+    const res = await GET(plainRequest("GET", `${URL_BASE}/${id}`), routeCtx(id));
+    expect(res.status).toBe(404);
+    await expect(res.json()).resolves.toEqual({ error: "部署记录不存在" });
+  });
+
+  it("404 部署记录不存在", async () => {
+    const res = await GET(plainRequest("GET", `${URL_BASE}/9999`), routeCtx(9999));
+    expect(res.status).toBe(404);
+    await expect(res.json()).resolves.toEqual({ error: "部署记录不存在" });
+  });
+
+  it.each(["abc", "", "not-a-number"])("400 无效 id %j", async (bad) => {
+    const res = await GET(plainRequest("GET", `${URL_BASE}/${bad}`), routeCtx(bad));
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toEqual({ error: "无效的 id" });
+  });
+
+  it("400 id 空串", async () => {
+    const res = await GET(plainRequest("GET", `${URL_BASE}/`), routeCtx(""));
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toEqual({ error: "无效的 id" });
+  });
+
+  it.each(["0", "-1"])("400 非正数 id %s", async (bad) => {
+    const res = await GET(plainRequest("GET", `${URL_BASE}/${bad}`), routeCtx(bad));
+    expect(res.status).toBe(400);
+  });
+
+  it("GET 不广播事件（只读操作）", async () => {
+    const serviceId = await seedService({ name: "evt-get-no-broadcast" });
+    const id = await seedDeployment(serviceId, { environment: "prod" });
+    const cap = captureEvents();
+    try {
+      await GET(plainRequest("GET", `${URL_BASE}/${id}`), routeCtx(id));
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("GET 与 PUT 闭环：PUT 更新后 GET 能读到新状态", async () => {
+    const id = await seedPending();
+    await PUT(jsonRequest("PUT", URL_BASE, { status: "success" }), routeCtx(id));
+    const body = await (
+      await GET(plainRequest("GET", `${URL_BASE}/${id}`), routeCtx(id))
+    ).json();
+    expect(body.status).toBe("success");
+    expect(body.finished_at).toMatch(TIMESTAMP_RE);
+  });
+
+  it("能查到不同环境的部署记录", async () => {
+    const serviceId = await seedService({ name: "get-multi-env" });
+    const testId = await seedDeployment(serviceId, { environment: "test", status: "success" });
+    const prodId = await seedDeployment(serviceId, { environment: "prod", status: "failed" });
+    const stagingId = await seedDeployment(serviceId, { environment: "staging", status: "pending" });
+
+    const testBody = await (
+      await GET(plainRequest("GET", `${URL_BASE}/${testId}`), routeCtx(testId))
+    ).json();
+    const prodBody = await (
+      await GET(plainRequest("GET", `${URL_BASE}/${prodId}`), routeCtx(prodId))
+    ).json();
+    const stagingBody = await (
+      await GET(plainRequest("GET", `${URL_BASE}/${stagingId}`), routeCtx(stagingId))
+    ).json();
+
+    expect(testBody.environment).toBe("test");
+    expect(prodBody.environment).toBe("prod");
+    expect(stagingBody.environment).toBe("staging");
+  });
+
+  it("GET 不依赖 query string，同一 service 两条 deployment 按 id 返回目标记录", async () => {
+    const serviceId = await seedService({ name: "get-query-independent" });
+    const firstId = await seedDeployment(serviceId, { environment: "test", version: "v1" });
+    const secondId = await seedDeployment(serviceId, { environment: "prod", version: "v2" });
+    const body = await (
+      await GET(
+        plainRequest("GET", `${URL_BASE}/${firstId}?service_id=${serviceId}&env=prod`),
+        routeCtx(firstId)
+      )
+    ).json();
+    expect(body.id).toBe(firstId);
+    expect(body.version).toBe("v1");
+    expect(body.id).not.toBe(secondId);
+  });
+
+  it("数据真的从数据库读取（绕过 API 直接验库）", async () => {
+    const serviceId = await seedService({ name: "get-db-read" });
+    const id = await seedDeployment(serviceId, {
+      environment: "staging",
+      version: "v9.9.9",
+      note: "hotfix-on-call",
+    });
+    const body = await (
+      await GET(plainRequest("GET", `${URL_BASE}/${id}`), routeCtx(id))
+    ).json();
+    // 直接读库验证数据一致
+    const db = await getDb();
+    const [row] = query<{ version: string; note: string }>(
+      db,
+      "SELECT version, note FROM deployments WHERE id = ?",
+      [id]
+    );
+    expect(body.version).toBe(row.version);
+    expect(body.note).toBe(row.note);
   });
 });
