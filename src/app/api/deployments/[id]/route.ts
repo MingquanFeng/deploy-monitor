@@ -9,6 +9,27 @@ import "@/lib/notify";
 
 const STATUSES: DeploymentStatus[] = ["pending", "success", "failed"];
 
+export async function GET(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { id } = await params;
+  const idNum = parseInt(id, 10);
+  if (Number.isNaN(idNum) || idNum <= 0) {
+    return NextResponse.json({ error: "无效的 id" }, { status: 400 });
+  }
+  const db = await getDb();
+  const rows = query(
+    db,
+    "SELECT d.*, s.name AS service_name FROM deployments d JOIN services s ON d.service_id = s.id WHERE d.id = ?",
+    [idNum]
+  );
+  if (!rows.length) {
+    return NextResponse.json({ error: "部署记录不存在" }, { status: 404 });
+  }
+  return NextResponse.json(rows[0]);
+}
+
 export async function PUT(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }

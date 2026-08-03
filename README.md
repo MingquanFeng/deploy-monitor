@@ -83,6 +83,7 @@ DELETE /api/services/:id       # 删除服务
 
 GET    /api/deployments        # 部署历史 (?service_id=&env=)
 POST   /api/deployments        # 新建部署记录
+GET    /api/deployments/:id    # 单条部署详情（含 service_name）
 PUT    /api/deployments/:id    # 更新部署状态
 
 POST   /api/webhook/deploy     # CI 接入（鉴权：Bearer WEBHOOK_TOKEN）

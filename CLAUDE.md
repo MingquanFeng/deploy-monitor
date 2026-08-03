@@ -64,6 +64,16 @@ const rows = query(db, "SELECT * FROM deployments WHERE id = ?", [Number(info.la
 
 `POST /api/services` 与 `PUT /api/services/[id]` 用 `isUniqueViolation(e)` 判断服务名重复并返回 409。
 
+**面向页面的部署记录查询要 JOIN 出 `service_name`**，不要裸 `SELECT * FROM deployments`：
+
+```ts
+query(db, `SELECT d.*, s.name AS service_name
+             FROM deployments d JOIN services s ON d.service_id = s.id
+            WHERE d.id = ?`, [idNum]);
+```
+
+`src/types/index.ts` 的 `Deployment` 把 `service_name` 声明为必填 `string`，但该列不在 `deployments` 表上，只由 JOIN 产出。裸 SELECT 少这个字段而 `query<T>` 是无校验断言，TS 不报错，前端到运行时才拿到 `undefined`。`GET /api/deployments` 与 `GET /api/deployments/[id]` 都已 JOIN；`POST` / `PUT` 的回读没有（它们的调用方不读 service_name）。
+
 ### 数据模型
 
 `services` 表：id, name(UNIQUE), description, owner, created_at  
@@ -91,6 +101,7 @@ const rows = query(db, "SELECT * FROM deployments WHERE id = ?", [Number(info.la
 | `/services` | 客户端组件 | 服务列表+新建+搜索 |
 | `/services/[id]` | 客户端组件 | 服务详情+部署历史+状态更新 |
 | `/deployments` | 客户端组件 | 全局部署历史+服务名搜索+环境筛选 |
+| `/deployments/[id]` | 客户端组件 | 单条部署详情+状态更新+同服务相邻部署 |
 | `/deployments/new` | 客户端组件 | 新建部署表单 |
 
 所有页面都是 `"use client"` 客户端组件，通过 `fetch` 调用 API。

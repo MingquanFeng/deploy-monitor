@@ -145,7 +145,11 @@ export default function ServiceDetailPage() {
               const busy = updating.has(d.id);
               return (
                 <tr key={d.id} className="border-t border-gray-100 hover:bg-gray-50">
-                  <td className={`${CELL_CLASS} font-mono`}>{d.version || "-"}</td>
+                  <td className={`${CELL_CLASS} font-mono`}>
+                    <Link href={`/deployments/${d.id}`} className="font-mono text-blue-600 hover:underline">
+                      {d.version || "-"}
+                    </Link>
+                  </td>
                   <td className={CELL_CLASS}>
                     {/* 生产环境加粗,和 test/staging 拉开视觉权重。 */}
                     <span
