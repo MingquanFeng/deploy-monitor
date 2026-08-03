@@ -8,6 +8,7 @@ import {
   resetDb,
   seedService,
   TIMESTAMP_RE,
+  captureEvents,
 } from "@/test/helpers";
 
 const URL_BASE = "http://localhost:3000/api/services";
@@ -202,6 +203,76 @@ describe("POST /api/services", () => {
         note TEXT DEFAULT '',
         started_at TEXT DEFAULT NULL,
         finished_at TEXT)`);
+    }
+  });
+});
+
+describe("POST /api/services — 变更事件广播", () => {
+  it("201 后广播 service.created，serviceId 为新建服务的 id", async () => {
+    const cap = captureEvents();
+    try {
+      const body = await (
+        await POST(jsonRequest("POST", URL_BASE, { name: "evt-created" }))
+      ).json();
+      expect(cap.events).toEqual([{ type: "service.created", serviceId: body.id }]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("400（名称为空）不广播任何事件", async () => {
+    const cap = captureEvents();
+    try {
+      expect((await POST(jsonRequest("POST", URL_BASE, {}))).status).toBe(400);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("400（body 非法 JSON）不广播任何事件", async () => {
+    const cap = captureEvents();
+    try {
+      expect((await POST(malformedRequest("POST", URL_BASE))).status).toBe(400);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("409（重名）不广播任何事件", async () => {
+    await seedService({ name: "dup-evt" });
+    const cap = captureEvents();
+    try {
+      expect((await POST(jsonRequest("POST", URL_BASE, { name: "dup-evt" }))).status).toBe(409);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("GET 不广播事件（只读操作）", async () => {
+    await seedService({ name: "read-only" });
+    const cap = captureEvents();
+    try {
+      await GET();
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("连续创建两个服务广播两条事件，serviceId 各自对应", async () => {
+    const cap = captureEvents();
+    try {
+      const a = await (await POST(jsonRequest("POST", URL_BASE, { name: "e1" }))).json();
+      const b = await (await POST(jsonRequest("POST", URL_BASE, { name: "e2" }))).json();
+      expect(cap.events).toEqual([
+        { type: "service.created", serviceId: a.id },
+        { type: "service.created", serviceId: b.id },
+      ]);
+    } finally {
+      cap.stop();
     }
   });
 });

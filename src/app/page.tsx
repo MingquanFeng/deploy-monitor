@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { useChangeStream } from "@/hooks/useChangeStream";
 import { ENV_LABELS, STATUS_COLORS, STATUS_GLYPH, STATUS_LABELS } from "@/lib/constants";
 import { formatRelativeTime } from "@/lib/format";
 import type { Service, Deployment } from "@/types";
@@ -59,10 +60,24 @@ export default function Dashboard() {
   const [services, setServices] = useState<Service[]>([]);
   const [deployments, setDeployments] = useState<Deployment[]>([]);
 
-  useEffect(() => {
+  /**
+   * load 无外部依赖（不读任何 state），所以 useCallback 的依赖是空数组、
+   * 身份永久稳定 —— 可以放心同时用于首次加载与实时刷新。
+   * 对比 deployments/page.tsx，那里的 load 依赖 envFilter，情况不同。
+   */
+  const load = useCallback(() => {
     fetch("/api/services").then((r) => r.json()).then(setServices);
     fetch("/api/deployments").then((r) => r.json()).then(setDeployments);
   }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  /**
+   * 仪表盘聚合的是全量数据（服务卡片 + 顶部四个统计），
+   * 任何一种变更都可能改变屏幕上的数字，所以不做过滤 —— 收到就重拉。
+   * 这是四个页面里唯一不过滤的一个。
+   */
+  useChangeStream(load);
 
   const getLatestDeployments = (serviceId: number) => {
     const envs: Record<string, Deployment> = {};

@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { useChangeStream } from "@/hooks/useChangeStream";
+import { affectsDeploymentList } from "@/lib/changeStream";
 import {
   CELL_CLASS,
   ENV_LABELS,
@@ -17,15 +19,43 @@ export default function DeploymentsPage() {
   const [envFilter, setEnvFilter] = useState("");
   const [search, setSearch] = useState("");
 
-  const load = () => {
+  /**
+   * load 读了 envFilter，所以必须 useCallback([envFilter])。
+   *
+   * 这解决了一个真实的闭包陷阱：原先 load 是每次 render 重建的普通函数，
+   * `useEffect(() => { load() }, [envFilter])` 恰好能工作（每次 render
+   * 的 effect 都捕获当轮的新 load），但那是巧合，也是那条 exhaustive-deps
+   * warning 的来源。接入 SSE 后同一个函数还要被实时刷新调用，
+   * 「捕获的 envFilter 是哪一轮的」就不再无关紧要 ——
+   * 如果传给 hook 的是一个捕获了旧 envFilter 的闭包，用户切到「生产」筛选后，
+   * 后续每次实时刷新都会悄悄把列表拉回「全部环境」的结果，
+   * 表现为「筛选偶尔自己失效」。
+   *
+   * useCallback 让 load 的身份与 envFilter 同步变化：筛选变了 → load 是新的
+   * → 下面两个 effect 都重新执行（重新拉数据 + 重新用新闭包订阅），
+   * 筛选没变时身份稳定、不会引起重连。
+   */
+  const load = useCallback(() => {
     const params = new URLSearchParams();
     if (envFilter) params.set("env", envFilter);
     fetch(`/api/deployments?${params}`)
       .then((r) => r.json())
       .then(setDeployments);
-  };
+  }, [envFilter]);
 
-  useEffect(() => { load(); }, [envFilter]);
+  useEffect(() => { load(); }, [load]);
+
+  /**
+   * 过滤：全部 deployment.*，加上 service.deleted（级联删了记录）
+   * 与 service.updated（本表有 service_name 一列，改名后要跟着变）。
+   * 判定逻辑在 changeStream.ts 里，是纯函数、有测试覆盖。
+   *
+   * onChange 是内联箭头函数，每次 render 都是新引用 —— 这没问题，
+   * hook 内部把它存进 ref，不会因此重连（见 useChangeStream.ts）。
+   */
+  useChangeStream((event) => {
+    if (affectsDeploymentList(event)) load();
+  });
 
   const filtered = search
     ? deployments.filter((d) =>

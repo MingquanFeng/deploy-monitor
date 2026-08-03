@@ -9,6 +9,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import ConnectionIndicator from "@/components/ConnectionIndicator";
 import { BUTTON_PRIMARY } from "@/lib/constants";
 
 const LINKS = [
@@ -58,9 +59,17 @@ export default function Nav() {
           );
         })}
 
-        <Link href="/deployments/new" className={`${BUTTON_PRIMARY} ml-auto`}>
-          新建部署
-        </Link>
+        {/*
+          ml-auto 从「新建部署」移到这里 —— 指示灯与按钮一起被推到右侧，
+          两者按 gap-3 并排。放在按钮左边而不是最右：最右是主操作的位置，
+          一个被动的状态显示不该占据它。
+        */}
+        <div className="ml-auto flex items-center gap-3">
+          <ConnectionIndicator />
+          <Link href="/deployments/new" className={BUTTON_PRIMARY}>
+            新建部署
+          </Link>
+        </div>
       </div>
     </nav>
   );

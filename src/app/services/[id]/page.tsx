@@ -1,9 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { useToast } from "@/components/Toast";
+import { useChangeStream } from "@/hooks/useChangeStream";
+import { affectsService } from "@/lib/changeStream";
 import {
   BUTTON_PRIMARY,
   CELL_CLASS,
@@ -26,12 +28,26 @@ export default function ServiceDetailPage() {
   // 避免连点产生重复 PUT。
   const [updating, setUpdating] = useState<Set<number>>(new Set());
 
-  useEffect(() => {
+  const load = useCallback(() => {
     fetch(`/api/services/${id}`).then((r) => r.json()).then(setService);
     fetch(`/api/deployments?service_id=${id}`)
       .then((r) => r.json())
       .then(setDeployments);
   }, [id]);
+
+  useEffect(() => { load(); }, [load]);
+
+  /**
+   * 只关心本服务的事件。这是过滤收益最明显的一页：一个有几十个服务的实例上，
+   * 别的服务频繁部署时本页完全不需要动 —— 不过滤的话每条事件都会触发两次 fetch。
+   *
+   * `id` 来自 useParams，是字符串；事件里的 serviceId 是数字，
+   * 必须显式转换。用 === 直接比会永远为 false，且 TypeScript 不报错
+   * （两边类型不同但比较合法），是个静默失效的坑。
+   */
+  useChangeStream((event) => {
+    if (affectsService(event, Number(id))) load();
+  });
 
   const updateStatus = async (depId: number, status: string) => {
     setUpdating((prev) => new Set(prev).add(depId));
@@ -46,6 +62,12 @@ export default function ServiceDetailPage() {
         return;
       }
       toast.success(`已标记为「${STATUS_LABELS[status]}」`);
+      /**
+       * 自己的操作仍然主动重拉，不依赖 SSE 把自己的变更推回来。
+       * SSE 断线时（重连窗口内）事件会丢，此时用户点了按钮却看不到行变化，
+       * 会以为没生效而重复点击。这次多余的 fetch 只在用户真的操作时发生，
+       * 代价可忽略，换来的是「点了就一定有反应」这个确定性。
+       */
       const listRes = await fetch(`/api/deployments?service_id=${id}`);
       setDeployments(await listRes.json());
     } finally {
