@@ -7,6 +7,7 @@ import { useToast } from "@/components/Toast";
 import { useChangeStream } from "@/hooks/useChangeStream";
 import { affectsService } from "@/lib/changeStream";
 import {
+  BUTTON_SECONDARY,
   ENV_LABELS,
   STATUS_BADGE,
   STATUS_GLYPH,
@@ -117,11 +118,22 @@ function AdjacentCard({
   );
 }
 
+/**
+ * 「回滚自」指向的那条记录。三种状态必须可区分，不能都塌成 null：
+ *   null        — 本条不是回滚（rollback_from 为空），字段整个不渲染
+ *   "missing"   — 是回滚，但源记录已被删（GET 返回非 2xx），渲染纯文本兜底
+ *   Deployment  — 源记录健在，渲染成可点的链接
+ * 用 null 兼表「没有」和「查不到」会让被删的源记录静默消失，
+ * 页面上看不出这是一次回滚 —— 恰好是回滚场景里最需要保留的信息。
+ */
+type RollbackSource = Deployment | "missing" | null;
+
 export default function DeploymentDetailPage() {
   const { id } = useParams<{ id: string }>();
   const toast = useToast();
   const [deployment, setDeployment] = useState<Deployment | null>(null);
   const [siblings, setSiblings] = useState<Deployment[]>([]);
+  const [rollbackSource, setRollbackSource] = useState<RollbackSource>(null);
   // 找不到（被别人删了 / URL 里的 id 不存在）与「还在加载」是两种状态，
   // 共用 deployment===null 会让删除后的页面永远停在「加载中...」。
   const [missing, setMissing] = useState(false);
@@ -133,11 +145,28 @@ export default function DeploymentDetailPage() {
       setMissing(true);
       setDeployment(null);
       setSiblings([]);
+      setRollbackSource(null);
       return;
     }
     const data: Deployment = await res.json();
     setMissing(false);
     setDeployment(data);
+
+    /**
+     * 回滚源。每次 load 都要先归零 —— load 会被 SSE 反复调用，
+     * 不清空的话「源记录刚被删掉」这一步只会让 fetch 失败，
+     * 旧的 Deployment 对象还留在 state 里，链接继续指向一条已经不存在的记录。
+     *
+     * 用 !== null 而非 truthy 判断：id 不会是 0，但 `if (data.rollback_from)`
+     * 会把将来任何 0/"" 的脏数据也当成「不是回滚」而静默跳过。
+     */
+    if (data.rollback_from !== null && data.rollback_from !== undefined) {
+      setRollbackSource(null);
+      const srcRes = await fetch(`/api/deployments/${data.rollback_from}`);
+      setRollbackSource(srcRes.ok ? await srcRes.json() : "missing");
+    } else {
+      setRollbackSource(null);
+    }
 
     // 相邻部署要按 service_id 查，而这个字段只能从主数据里拿到，
     // 所以两次请求必须串行，不能并发发出去。
@@ -273,6 +302,24 @@ export default function DeploymentDetailPage() {
             </Field>
           )}
           {duration && <Field label="耗时">{duration}</Field>}
+          {/* 回滚来源。只在本条确实是回滚时出现；源记录已删则退化为纯文本，
+              不给一个点进去必然 404 的链接。 */}
+          {rollbackSource && (
+            <Field label="回滚自">
+              {rollbackSource === "missing" ? (
+                <span className="text-gray-500">
+                  已删除的部署 #{deployment.rollback_from}
+                </span>
+              ) : (
+                <Link
+                  href={`/deployments/${rollbackSource.id}`}
+                  className="font-mono text-blue-600 hover:underline"
+                >
+                  {rollbackSource.version || `#${rollbackSource.id}`}
+                </Link>
+              )}
+            </Field>
+          )}
         </dl>
 
         {deployment.note && (
@@ -285,7 +332,9 @@ export default function DeploymentDetailPage() {
         )}
       </div>
 
-      {/* 区块 C：操作栏，仅 pending 可操作 */}
+      {/* 区块 C：操作栏。pending 时是就地改状态，failed 时是发起回滚。
+          两者互斥（状态机上 pending 与 failed 不可能同时成立），
+          但仍写成两个独立分支而不是三元 —— 将来加 success 态的操作时不用重构。 */}
       {deployment.status === "pending" && (
         <div className="mt-4 flex gap-3">
           <button
@@ -304,6 +353,19 @@ export default function DeploymentDetailPage() {
           >
             失败
           </button>
+        </div>
+      )}
+
+      {/* 回滚入口。视觉权重高于上面的「成功/失败」纯文字按钮：那两个是
+          就地改一个字段，这个会离开当前页去填一张表单，属于不同量级的动作。 */}
+      {deployment.status === "failed" && (
+        <div className="mt-4">
+          <Link
+            href={`/deployments/new?service_id=${deployment.service_id}&rollback_from=${deployment.id}`}
+            className={BUTTON_SECONDARY}
+          >
+            回滚此版本
+          </Link>
         </div>
       )}
 

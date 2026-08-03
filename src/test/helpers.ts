@@ -92,14 +92,16 @@ export async function seedDeployment(
     deployed_by?: string;
     note?: string;
     started_at?: string;
+    /** 指向被本次回滚修复的那条部署记录 id;不传即普通部署记录 */
+    rollback_from?: number | null;
   } = {}
 ): Promise<number> {
   const db = await getDb();
   const info = runInfo(
     db,
     `INSERT INTO deployments
-       (service_id, environment, version, status, deployed_by, note, started_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       (service_id, environment, version, status, deployed_by, note, started_at, rollback_from)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       serviceId,
       overrides.environment ?? "prod",
@@ -108,6 +110,7 @@ export async function seedDeployment(
       overrides.deployed_by ?? "",
       overrides.note ?? "",
       overrides.started_at ?? "2026-01-01 00:00:00",
+      overrides.rollback_from ?? null,
     ]
   );
   return Number(info.lastInsertRowid);

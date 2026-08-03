@@ -145,10 +145,18 @@ export default function ServiceDetailPage() {
               const busy = updating.has(d.id);
               return (
                 <tr key={d.id} className="border-t border-gray-100 hover:bg-gray-50">
-                  <td className={`${CELL_CLASS} font-mono`}>
+                  {/* 徽章放在 Link 之外：它是一条元信息，不是导航目标的一部分。
+                      放进 Link 会让「回滚」二字变成可点击热区并被读屏软件
+                      连读进链接名（"v1.2.3 回滚 链接"），把状态标注误报成目的地。 */}
+                  <td className={CELL_CLASS}>
                     <Link href={`/deployments/${d.id}`} className="font-mono text-blue-600 hover:underline">
                       {d.version || "-"}
                     </Link>
+                    {d.rollback_from !== null && (
+                      <span className="ml-1.5 rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-800">
+                        回滚
+                      </span>
+                    )}
                   </td>
                   <td className={CELL_CLASS}>
                     {/* 生产环境加粗,和 test/staging 拉开视觉权重。 */}

@@ -382,6 +382,7 @@ describe("GET /api/deployments/[id]", () => {
       note: "",
       started_at: "2026-06-01 12:00:00",
       finished_at: null,
+      rollback_from: null,
     });
   });
 

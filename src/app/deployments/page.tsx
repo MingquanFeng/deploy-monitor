@@ -124,7 +124,17 @@ export default function DeploymentsPage() {
                     {d.service_name}
                   </Link>
                 </td>
-                <td className={`${CELL_CLASS} font-mono`}>{d.version || "-"}</td>
+                {/* 版本 + 回滚标识。font-mono 收窄到版本号自己身上，不再挂在 td：
+                    徽章里是中文，跟着继承等宽字体会掉进 fallback 字形，
+                    与页面其它中文对不上基线。 */}
+                <td className={CELL_CLASS}>
+                  <span className="font-mono">{d.version || "-"}</span>
+                  {d.rollback_from !== null && (
+                    <span className="ml-1.5 rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-800">
+                      回滚
+                    </span>
+                  )}
+                </td>
                 <td className={CELL_CLASS}>
                   <span
                     className={

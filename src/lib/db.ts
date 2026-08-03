@@ -68,6 +68,18 @@ db.exec(`
   )
 `);
 
+// 回滚标记:rollback_from 指向被本次回滚修复的那条部署记录。
+// SQLite 没有 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` 语法,重复执行 ADD COLUMN
+// 会直接抛 "duplicate column name",所以幂等只能靠先查 table_info 再决定是否执行。
+// db.pragma() 的声明返回类型是 unknown,需要断言成行结构才能取 name。
+const deploymentCols = db.pragma("table_info(deployments)") as { name: string }[];
+if (!deploymentCols.some((c) => c.name === "rollback_from")) {
+  // ON DELETE SET NULL:被回滚的原记录若被删,回滚记录本身保留,只是丢掉指向。
+  db.exec(
+    "ALTER TABLE deployments ADD COLUMN rollback_from INTEGER REFERENCES deployments(id) ON DELETE SET NULL"
+  );
+}
+
 /**
  * better-sqlite3 是同步驱动,拿实例不需要等待。
  * 保留 async 签名是刻意的:16 处调用点都写着 `await getDb()`,

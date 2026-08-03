@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "@/lib/db";
 import { getDb, isUniqueViolation, nowLocal, query, run, runInfo } from "@/lib/db";
-import { TIMESTAMP_RE } from "@/test/helpers";
+import { resetDb, TIMESTAMP_RE } from "@/test/helpers";
 
 /**
  * 方案 A:测试自己建 in-memory 数据库,直接测 query()/run() 这两个纯函数
@@ -33,7 +33,8 @@ const SCHEMA_DEPLOYMENTS = `
     deployed_by TEXT    DEFAULT '',
     note        TEXT    DEFAULT '',
     started_at  TEXT    DEFAULT NULL,
-    finished_at TEXT
+    finished_at TEXT,
+    rollback_from INTEGER REFERENCES deployments(id) ON DELETE SET NULL
   )
 `;
 
@@ -613,5 +614,175 @@ describe("getDb() 真实单例", () => {
     // 铁证:cwd 与 DATA_DIR 都在临时区,不在仓库里
     expect(process.cwd()).toContain("deploy-monitor-test-");
     expect(dataDir).not.toContain("workspace");
+  });
+});
+
+/**
+ * 回滚标记 migration。
+ *
+ * 这一节刻意打在 getDb() 单例上,不用 freshDb() —— freshDb() 的 schema 是测试文件里
+ * 手抄的副本,拿它断言 migration 只能证明「我抄对了」。ALTER TABLE 是否真的跑过、
+ * 外键动作是否真的是 SET NULL,只有真实连接说得清。
+ */
+describe("migration: deployments.rollback_from", () => {
+  let db: Db;
+  beforeEach(async () => {
+    db = await resetDb();
+  });
+
+  function seedPair(name: string): { serviceId: number; deploymentId: number } {
+    const serviceId = Number(
+      runInfo(db, "INSERT INTO services (name) VALUES (?)", [name]).lastInsertRowid
+    );
+    const deploymentId = Number(
+      runInfo(db, "INSERT INTO deployments (service_id, environment) VALUES (?, ?)", [
+        serviceId,
+        "prod",
+      ]).lastInsertRowid
+    );
+    return { serviceId, deploymentId };
+  }
+
+  it("deployments 表存在 rollback_from 列", () => {
+    const cols = db.pragma("table_info(deployments)") as { name: string; type: string }[];
+    const col = cols.find((c) => c.name === "rollback_from");
+    expect(col).toBeDefined();
+    expect(col!.type).toBe("INTEGER");
+  });
+
+  it("不写该列时默认为 null", () => {
+    const { deploymentId } = seedPair("rbcol-default");
+    const rows = query<{ rollback_from: number | null }>(
+      db,
+      "SELECT rollback_from FROM deployments WHERE id = ?",
+      [deploymentId]
+    );
+    expect(rows[0].rollback_from).toBeNull();
+  });
+
+  it("可以写入指向同表既有记录的 id", () => {
+    const { serviceId, deploymentId } = seedPair("rbcol-selfref");
+    const rollbackId = Number(
+      runInfo(
+        db,
+        "INSERT INTO deployments (service_id, environment, rollback_from) VALUES (?, ?, ?)",
+        [serviceId, "prod", deploymentId]
+      ).lastInsertRowid
+    );
+    const rows = query<{ rollback_from: number | null }>(
+      db,
+      "SELECT rollback_from FROM deployments WHERE id = ?",
+      [rollbackId]
+    );
+    expect(rows[0].rollback_from).toBe(deploymentId);
+  });
+
+  it("自引用外键生效:指向不存在的 id 抛 FOREIGN KEY 约束错误", () => {
+    const { serviceId } = seedPair("rbcol-fk");
+    let caught: unknown;
+    try {
+      run(
+        db,
+        "INSERT INTO deployments (service_id, environment, rollback_from) VALUES (?, ?, ?)",
+        [serviceId, "prod", 99999]
+      );
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeDefined();
+    expect((caught as Error).message).toMatch(/FOREIGN KEY constraint failed/);
+    expect((caught as { code?: string }).code).toBe("SQLITE_CONSTRAINT_FOREIGNKEY");
+  });
+
+  it("外键失败时不落库", () => {
+    const { serviceId } = seedPair("rbcol-fk-nowrite");
+    expect(() =>
+      run(
+        db,
+        "INSERT INTO deployments (service_id, environment, rollback_from) VALUES (?, ?, ?)",
+        [serviceId, "prod", 99999]
+      )
+    ).toThrow();
+    // 只剩 seedPair 建的那一条
+    expect(query(db, "SELECT * FROM deployments")).toHaveLength(1);
+  });
+
+  it("ON DELETE SET NULL:删掉被指向的记录后,回滚记录保留、指向置空", () => {
+    // 这条是本功能最关键的数据完整性保证。若写成 ON DELETE CASCADE,
+    // 删一条旧部署会连带删掉所有回滚它的记录 —— 那是静默的数据丢失。
+    const { serviceId, deploymentId } = seedPair("rbcol-setnull");
+    const rollbackId = Number(
+      runInfo(
+        db,
+        "INSERT INTO deployments (service_id, environment, version, rollback_from) VALUES (?, ?, ?, ?)",
+        [serviceId, "prod", "v1-rollback", deploymentId]
+      ).lastInsertRowid
+    );
+
+    run(db, "DELETE FROM deployments WHERE id = ?", [deploymentId]);
+
+    const rows = query<{ id: number; version: string; rollback_from: number | null }>(
+      db,
+      "SELECT id, version, rollback_from FROM deployments WHERE id = ?",
+      [rollbackId]
+    );
+    // 记录还在(没被 CASCADE 带走)
+    expect(rows).toHaveLength(1);
+    expect(rows[0].version).toBe("v1-rollback");
+    // 指向已置空
+    expect(rows[0].rollback_from).toBeNull();
+    // 全表也只剩这一条,被删的那条确实没了
+    expect(query(db, "SELECT * FROM deployments")).toHaveLength(1);
+  });
+
+  it("ON DELETE SET NULL 对多条指向同一记录的回滚全部生效", () => {
+    const { serviceId, deploymentId } = seedPair("rbcol-setnull-many");
+    for (const v of ["rb-1", "rb-2", "rb-3"]) {
+      run(
+        db,
+        "INSERT INTO deployments (service_id, environment, version, rollback_from) VALUES (?, ?, ?, ?)",
+        [serviceId, "prod", v, deploymentId]
+      );
+    }
+    run(db, "DELETE FROM deployments WHERE id = ?", [deploymentId]);
+
+    const rows = query<{ rollback_from: number | null }>(
+      db,
+      "SELECT rollback_from FROM deployments ORDER BY id"
+    );
+    expect(rows).toHaveLength(3);
+    expect(rows.every((r) => r.rollback_from === null)).toBe(true);
+  });
+
+  it("删服务仍走 CASCADE:回滚链上的记录一并清掉,不因 SET NULL 而留下孤儿", () => {
+    // service_id 的 CASCADE 与 rollback_from 的 SET NULL 是两条独立的外键动作,
+    // 这里守住前者没被后者影响。
+    const { serviceId, deploymentId } = seedPair("rbcol-cascade");
+    run(
+      db,
+      "INSERT INTO deployments (service_id, environment, rollback_from) VALUES (?, ?, ?)",
+      [serviceId, "prod", deploymentId]
+    );
+    expect(query(db, "SELECT * FROM deployments")).toHaveLength(2);
+
+    run(db, "DELETE FROM services WHERE id = ?", [serviceId]);
+
+    expect(query(db, "SELECT * FROM deployments")).toEqual([]);
+  });
+
+  it("UPDATE 也受外键约束:改成不存在的 id 被拒", () => {
+    const { deploymentId } = seedPair("rbcol-update-fk");
+    expect(() =>
+      run(db, "UPDATE deployments SET rollback_from = ? WHERE id = ?", [99999, deploymentId])
+    ).toThrow(/FOREIGN KEY constraint failed/);
+  });
+
+  it("migration 幂等:重复取单例不会重复 ALTER,列仍只有一个", async () => {
+    // ALTER TABLE ADD COLUMN 重复执行会抛 "duplicate column name",
+    // db.ts 靠先查 table_info 再决定是否执行来保证幂等。
+    await getDb();
+    await getDb();
+    const cols = db.pragma("table_info(deployments)") as { name: string }[];
+    expect(cols.filter((c) => c.name === "rollback_from")).toHaveLength(1);
   });
 });
