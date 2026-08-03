@@ -215,7 +215,13 @@ describe("PUT /api/deployments/[id] — 变更事件广播", () => {
       const res = await PUT(jsonRequest("PUT", URL_BASE, { status: "success" }), routeCtx(id));
       expect(res.status).toBe(200);
       expect(cap.events).toEqual([
-        { type: "deployment.updated", deploymentId: id, serviceId },
+        {
+          type: "deployment.updated",
+          deploymentId: id,
+          serviceId,
+          status: "success",
+          previousStatus: "pending",
+        },
       ]);
     } finally {
       cap.stop();
@@ -233,7 +239,13 @@ describe("PUT /api/deployments/[id] — 变更事件广播", () => {
         routeCtx(id)
       );
       expect(cap.events).toEqual([
-        { type: "deployment.updated", deploymentId: id, serviceId },
+        {
+          type: "deployment.updated",
+          deploymentId: id,
+          serviceId,
+          status: "failed",
+          previousStatus: "pending",
+        },
       ]);
     } finally {
       cap.stop();
@@ -294,6 +306,36 @@ describe("PUT /api/deployments/[id] — 变更事件广播", () => {
       await PUT(jsonRequest("PUT", URL_BASE, { status: "failed" }), routeCtx(id));
       expect(cap.events).toHaveLength(2);
       expect(cap.events.every((e) => e.type === "deployment.updated")).toBe(true);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("previousStatus 是改动前的状态，不是改动后的", async () => {
+    const id = await seedPending();
+    const cap = captureEvents();
+    try {
+      // pending → success → failed，第二条事件的前态必须是 success
+      await PUT(jsonRequest("PUT", URL_BASE, { status: "success" }), routeCtx(id));
+      await PUT(jsonRequest("PUT", URL_BASE, { status: "failed" }), routeCtx(id));
+      expect(cap.events).toMatchObject([
+        { previousStatus: "pending", status: "success" },
+        { previousStatus: "success", status: "failed" },
+      ]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("状态未变时前后态相同（失败通知据此避免重复推送）", async () => {
+    const serviceId = await seedService({ name: "evt-same-status" });
+    const id = await seedDeployment(serviceId, { status: "failed" });
+    const cap = captureEvents();
+    try {
+      await PUT(jsonRequest("PUT", URL_BASE, { status: "failed" }), routeCtx(id));
+      expect(cap.events).toMatchObject([
+        { previousStatus: "failed", status: "failed" },
+      ]);
     } finally {
       cap.stop();
     }
