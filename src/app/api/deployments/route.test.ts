@@ -275,6 +275,266 @@ describe("POST /api/deployments", () => {
   });
 });
 
+describe("POST /api/deployments — 回滚标记", () => {
+  it("201 不传 rollback_from 时为 null", async () => {
+    const id = await seedService({ name: "rb-omit" });
+    const res = await POST(
+      jsonRequest("POST", URL_BASE, { service_id: id, environment: "prod" })
+    );
+    expect(res.status).toBe(201);
+    await expect(res.json()).resolves.toMatchObject({ rollback_from: null });
+  });
+
+  it("201 显式传 null 时为 null", async () => {
+    const id = await seedService({ name: "rb-null" });
+    const res = await POST(
+      jsonRequest("POST", URL_BASE, {
+        service_id: id,
+        environment: "prod",
+        rollback_from: null,
+      })
+    );
+    expect(res.status).toBe(201);
+    await expect(res.json()).resolves.toMatchObject({ rollback_from: null });
+  });
+
+  it("201 传同服务的合法部署 id 时原样返回", async () => {
+    const id = await seedService({ name: "rb-ok" });
+    const target = await seedDeployment(id, { environment: "prod", version: "v1" });
+    const res = await POST(
+      jsonRequest("POST", URL_BASE, {
+        service_id: id,
+        environment: "prod",
+        version: "v1-rollback",
+        rollback_from: target,
+      })
+    );
+    expect(res.status).toBe(201);
+    await expect(res.json()).resolves.toMatchObject({ rollback_from: target });
+  });
+
+  it("rollback_from 真的落库(绕过 API 直接查库)", async () => {
+    const id = await seedService({ name: "rb-persist" });
+    const target = await seedDeployment(id, { environment: "prod" });
+    const body = await (
+      await POST(
+        jsonRequest("POST", URL_BASE, {
+          service_id: id,
+          environment: "prod",
+          rollback_from: target,
+        })
+      )
+    ).json();
+
+    const db = await getDb();
+    const rows = query<{ rollback_from: number | null }>(
+      db,
+      "SELECT rollback_from FROM deployments WHERE id = ?",
+      [body.id]
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].rollback_from).toBe(target);
+  });
+
+  it.each([
+    ["0", 0],
+    ["负数", -1],
+    ["非数字字符串", "abc"],
+    ["小数", 1.5],
+  ])("400 rollback_from 是%s", async (_label, value) => {
+    const id = await seedService({ name: `rb-bad-${String(value)}` });
+    await seedDeployment(id, { environment: "prod" });
+    const res = await POST(
+      jsonRequest("POST", URL_BASE, {
+        service_id: id,
+        environment: "prod",
+        rollback_from: value,
+      })
+    );
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toEqual({
+      error: "rollback_from 必须是正整数",
+    });
+  });
+
+  it("400 时不写入这条回滚记录", async () => {
+    const id = await seedService({ name: "rb-nowrite" });
+    const res = await POST(
+      jsonRequest("POST", URL_BASE, {
+        service_id: id,
+        environment: "prod",
+        rollback_from: -1,
+      })
+    );
+    expect(res.status).toBe(400);
+    const db = await getDb();
+    expect(query(db, "SELECT * FROM deployments")).toEqual([]);
+  });
+
+  it("400 被回滚的记录不存在", async () => {
+    const id = await seedService({ name: "rb-missing" });
+    const res = await POST(
+      jsonRequest("POST", URL_BASE, {
+        service_id: id,
+        environment: "prod",
+        rollback_from: 99999,
+      })
+    );
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toEqual({
+      error: "被回滚的部署记录不存在",
+    });
+  });
+
+  it("400 被回滚的记录属于其它服务", async () => {
+    const a = await seedService({ name: "rb-svc-a" });
+    const b = await seedService({ name: "rb-svc-b" });
+    await seedDeployment(a, { environment: "prod" });
+    const foreign = await seedDeployment(b, { environment: "prod" });
+
+    const res = await POST(
+      jsonRequest("POST", URL_BASE, {
+        service_id: a,
+        environment: "prod",
+        rollback_from: foreign,
+      })
+    );
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toEqual({
+      error: "不能回滚其它服务的部署",
+    });
+  });
+
+  it("跨服务被拒后不留下脏数据(仍只有 seed 的两条)", async () => {
+    const a = await seedService({ name: "rb-clean-a" });
+    const b = await seedService({ name: "rb-clean-b" });
+    await seedDeployment(a, { environment: "prod" });
+    const foreign = await seedDeployment(b, { environment: "prod" });
+
+    await POST(
+      jsonRequest("POST", URL_BASE, {
+        service_id: a,
+        environment: "prod",
+        rollback_from: foreign,
+      })
+    );
+    const db = await getDb();
+    expect(query(db, "SELECT * FROM deployments")).toHaveLength(2);
+  });
+
+  it("校验顺序:service_id 缺失时报 service_id 的错,不报 rollback_from 的错", async () => {
+    const res = await POST(
+      jsonRequest("POST", URL_BASE, { environment: "prod", rollback_from: -1 })
+    );
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toEqual({
+      error: "service_id 和 environment 必填",
+    });
+  });
+
+  // 校验顺序已定案:400(形状)在读库之前,404/400(存在性)在读库之后。
+  // 这沿用本路由既有约定 —— environment 的枚举校验同样排在服务存在性查询之前。
+  // 因此 service_id=99999 + rollback_from=-1 先撞上 rollback_from 的形状校验,返回 400。
+  it("校验顺序:rollback_from 形状非法时先报形状错,早于服务存在性查询", async () => {
+    const res = await POST(
+      jsonRequest("POST", URL_BASE, {
+        service_id: 99999,
+        environment: "prod",
+        rollback_from: -1,
+      })
+    );
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toEqual({
+      error: "rollback_from 必须是正整数",
+    });
+  });
+
+  it("校验顺序:rollback_from 形状合法时,服务不存在报 404", async () => {
+    const res = await POST(
+      jsonRequest("POST", URL_BASE, {
+        service_id: 99999,
+        environment: "prod",
+        rollback_from: 1,
+      })
+    );
+    expect(res.status).toBe(404);
+    await expect(res.json()).resolves.toEqual({ error: "服务不存在" });
+  });
+
+  it("校验顺序:environment 非法时报 environment 的错,不报 rollback_from 的错", async () => {
+    const id = await seedService({ name: "rb-order-env" });
+    const res = await POST(
+      jsonRequest("POST", URL_BASE, {
+        service_id: id,
+        environment: "dev",
+        rollback_from: -1,
+      })
+    );
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toEqual({
+      error: "environment 必须为 test/staging/prod",
+    });
+  });
+
+  it("回滚记录创建后仍广播 deployment.created", async () => {
+    const serviceId = await seedService({ name: "rb-event" });
+    const target = await seedDeployment(serviceId, { environment: "prod" });
+    const cap = captureEvents();
+    try {
+      const body = await (
+        await POST(
+          jsonRequest("POST", URL_BASE, {
+            service_id: serviceId,
+            environment: "prod",
+            rollback_from: target,
+          })
+        )
+      ).json();
+      expect(cap.events).toEqual([
+        { type: "deployment.created", deploymentId: body.id, serviceId },
+      ]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("rollback_from 校验失败时不广播", async () => {
+    const serviceId = await seedService({ name: "rb-event-bad" });
+    const cap = captureEvents();
+    try {
+      const res = await POST(
+        jsonRequest("POST", URL_BASE, {
+          service_id: serviceId,
+          environment: "prod",
+          rollback_from: 99999,
+        })
+      );
+      expect(res.status).toBe(400);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("GET 返回的记录带 rollback_from 字段", async () => {
+    const id = await seedService({ name: "rb-get" });
+    const target = await seedDeployment(id, { environment: "prod" });
+    await POST(
+      jsonRequest("POST", URL_BASE, {
+        service_id: id,
+        environment: "prod",
+        rollback_from: target,
+      })
+    );
+    const body = await (
+      await GET(plainRequest("GET", `${URL_BASE}?service_id=${id}`))
+    ).json();
+    const rollback = body.find((d: { rollback_from: number | null }) => d.rollback_from !== null);
+    expect(rollback).toBeDefined();
+    expect(rollback.rollback_from).toBe(target);
+  });
+});
+
 describe("POST /api/deployments — 变更事件广播", () => {
   it("201 后广播 deployment.created，带 deploymentId 与 serviceId", async () => {
     const serviceId = await seedService({ name: "evt-dep" });
