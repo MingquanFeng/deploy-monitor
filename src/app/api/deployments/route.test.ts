@@ -9,6 +9,7 @@ import {
   seedDeployment,
   seedService,
   TIMESTAMP_RE,
+  captureEvents,
 } from "@/test/helpers";
 
 const URL_BASE = "http://localhost:3000/api/deployments";
@@ -271,5 +272,98 @@ describe("POST /api/deployments", () => {
     );
     const body = await (await GET(plainRequest("GET", URL_BASE))).json();
     expect(body[0]).toMatchObject({ version: "v9", service_name: "loop" });
+  });
+});
+
+describe("POST /api/deployments — 变更事件广播", () => {
+  it("201 后广播 deployment.created，带 deploymentId 与 serviceId", async () => {
+    const serviceId = await seedService({ name: "evt-dep" });
+    const cap = captureEvents();
+    try {
+      const body = await (
+        await POST(jsonRequest("POST", URL_BASE, { service_id: serviceId, environment: "prod" }))
+      ).json();
+      expect(cap.events).toEqual([
+        { type: "deployment.created", deploymentId: body.id, serviceId },
+      ]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("400（缺 service_id / environment）不广播", async () => {
+    const cap = captureEvents();
+    try {
+      expect((await POST(jsonRequest("POST", URL_BASE, {}))).status).toBe(400);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("400（非法 environment）不广播", async () => {
+    const serviceId = await seedService({ name: "evt-badenv" });
+    const cap = captureEvents();
+    try {
+      const res = await POST(
+        jsonRequest("POST", URL_BASE, { service_id: serviceId, environment: "qa" })
+      );
+      expect(res.status).toBe(400);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("400（body 非法 JSON）不广播", async () => {
+    const cap = captureEvents();
+    try {
+      expect((await POST(malformedRequest("POST", URL_BASE))).status).toBe(400);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("404（服务不存在）不广播", async () => {
+    const cap = captureEvents();
+    try {
+      const res = await POST(
+        jsonRequest("POST", URL_BASE, { service_id: 9999, environment: "prod" })
+      );
+      expect(res.status).toBe(404);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("GET 不广播事件（只读操作）", async () => {
+    const serviceId = await seedService({ name: "evt-dep-get" });
+    await seedDeployment(serviceId, { environment: "prod" });
+    const cap = captureEvents();
+    try {
+      await GET(plainRequest("GET", URL_BASE));
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("并发创建两条部署，两条事件的 deploymentId 各不相同", async () => {
+    const serviceId = await seedService({ name: "evt-concurrent" });
+    const cap = captureEvents();
+    try {
+      await Promise.all([
+        POST(jsonRequest("POST", URL_BASE, { service_id: serviceId, environment: "prod" })),
+        POST(jsonRequest("POST", URL_BASE, { service_id: serviceId, environment: "prod" })),
+      ]);
+      expect(cap.events).toHaveLength(2);
+      const ids = cap.events.map((e) => (e as { deploymentId: number }).deploymentId);
+      expect(new Set(ids).size).toBe(2);
+      expect(cap.events.every((e) => e.type === "deployment.created")).toBe(true);
+    } finally {
+      cap.stop();
+    }
   });
 });

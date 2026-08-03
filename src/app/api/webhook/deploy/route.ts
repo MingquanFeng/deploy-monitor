@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, nowLocal, query, runInfo } from "@/lib/db";
+import { publish } from "@/lib/events";
 
 function unauthorized(msg: string) {
   return NextResponse.json({ error: msg }, { status: 401 });
@@ -67,5 +68,12 @@ export async function POST(req: NextRequest) {
   const rows = query(db, "SELECT * FROM deployments WHERE id = ?", [
     Number(info.lastInsertRowid),
   ]);
+  // 与 POST /api/deployments 发同一个事件类型:对客户端而言「新增了一条部署记录」
+  // 是同一件事,来源是人工录入还是 CI 上报不影响刷新逻辑。
+  publish({
+    type: "deployment.created",
+    deploymentId: Number(info.lastInsertRowid),
+    serviceId,
+  });
   return NextResponse.json(rows[0], { status: 201 });
 }

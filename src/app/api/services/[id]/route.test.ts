@@ -9,6 +9,7 @@ import {
   routeCtx,
   seedDeployment,
   seedService,
+  captureEvents,
 } from "@/test/helpers";
 
 const URL_BASE = "http://localhost:3000/api/services";
@@ -224,5 +225,126 @@ describe("DELETE /api/services/[id]", () => {
     const id = await seedService({ name: "recycled" });
     await DELETE(plainRequest("DELETE", URL_BASE), routeCtx(id));
     await expect(seedService({ name: "recycled" })).resolves.toEqual(expect.any(Number));
+  });
+});
+
+describe("变更事件广播", () => {
+  it("PUT 200 后广播 service.updated", async () => {
+    const id = await seedService({ name: "evt-upd" });
+    const cap = captureEvents();
+    try {
+      const res = await PUT(jsonRequest("PUT", URL_BASE, { owner: "bob" }), routeCtx(id));
+      expect(res.status).toBe(200);
+      expect(cap.events).toEqual([{ type: "service.updated", serviceId: id }]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("PUT 404 不广播", async () => {
+    const cap = captureEvents();
+    try {
+      const res = await PUT(jsonRequest("PUT", URL_BASE, { owner: "x" }), routeCtx(9999));
+      expect(res.status).toBe(404);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("PUT 409（改成已存在的名字）不广播", async () => {
+    await seedService({ name: "taken-evt" });
+    const id = await seedService({ name: "mine-evt" });
+    const cap = captureEvents();
+    try {
+      const res = await PUT(jsonRequest("PUT", URL_BASE, { name: "taken-evt" }), routeCtx(id));
+      expect(res.status).toBe(409);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("PUT 400（无效 id）不广播", async () => {
+    const cap = captureEvents();
+    try {
+      const res = await PUT(jsonRequest("PUT", URL_BASE, { owner: "x" }), routeCtx("abc"));
+      expect(res.status).toBe(400);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("PUT 400（body 非法 JSON）不广播", async () => {
+    const id = await seedService({ name: "bad-json-evt" });
+    const cap = captureEvents();
+    try {
+      const res = await PUT(malformedRequest("PUT", URL_BASE), routeCtx(id));
+      expect(res.status).toBe(400);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("DELETE 200 后广播 service.deleted", async () => {
+    const id = await seedService({ name: "evt-del" });
+    const cap = captureEvents();
+    try {
+      const res = await DELETE(plainRequest("DELETE", URL_BASE), routeCtx(id));
+      expect(res.status).toBe(200);
+      expect(cap.events).toEqual([{ type: "service.deleted", serviceId: id }]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("DELETE 级联删掉多条部署记录时仍只广播一条 service.deleted（事件数不随数据量增长）", async () => {
+    const id = await seedService({ name: "evt-cascade" });
+    for (let i = 0; i < 5; i++) await seedDeployment(id, { environment: "prod" });
+    const cap = captureEvents();
+    try {
+      await DELETE(plainRequest("DELETE", URL_BASE), routeCtx(id));
+      expect(cap.events).toEqual([{ type: "service.deleted", serviceId: id }]);
+      // 记录确实被级联删了(客户端据 service.deleted 刷新部署列表是有依据的)
+      const db = await getDb();
+      expect(query(db, "SELECT id FROM deployments WHERE service_id = ?", [id])).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("DELETE 404 不广播", async () => {
+    const cap = captureEvents();
+    try {
+      const res = await DELETE(plainRequest("DELETE", URL_BASE), routeCtx(9999));
+      expect(res.status).toBe(404);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("DELETE 400（无效 id）不广播", async () => {
+    const cap = captureEvents();
+    try {
+      const res = await DELETE(plainRequest("DELETE", URL_BASE), routeCtx("xyz"));
+      expect(res.status).toBe(400);
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
+  });
+
+  it("GET 不广播事件（只读操作）", async () => {
+    const id = await seedService({ name: "evt-get" });
+    const cap = captureEvents();
+    try {
+      await GET(plainRequest("GET", `${URL_BASE}/${id}`), routeCtx(id));
+      expect(cap.events).toEqual([]);
+    } finally {
+      cap.stop();
+    }
   });
 });

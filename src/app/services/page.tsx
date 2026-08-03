@@ -1,9 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import { useToast } from "@/components/Toast";
+import { useChangeStream } from "@/hooks/useChangeStream";
+import { affectsServiceList } from "@/lib/changeStream";
 import {
   BUTTON_PRIMARY,
   BUTTON_SECONDARY,
@@ -27,8 +29,16 @@ export default function ServicesPage() {
   // 这样对话框里能显示服务名 —— 让用户确认的是「删哪个」,不是「删不删」。
   const [pendingDelete, setPendingDelete] = useState<Service | null>(null);
 
-  const load = () => fetch("/api/services").then((r) => r.json()).then(setServices);
-  useEffect(() => { load(); }, []);
+  const load = useCallback(
+    () => fetch("/api/services").then((r) => r.json()).then(setServices),
+    []
+  );
+  useEffect(() => { load(); }, [load]);
+
+  /** 这张表只显示服务字段，部署事件与它无关，过滤掉。 */
+  useChangeStream((event) => {
+    if (affectsServiceList(event)) load();
+  });
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDb, nowLocal, query, runInfo } from "@/lib/db";
+import { publish } from "@/lib/events";
 
 export async function GET(req: NextRequest) {
   const db = await getDb();
@@ -64,5 +65,10 @@ export async function POST(req: NextRequest) {
   const rows = query(db, "SELECT * FROM deployments WHERE id = ?", [
     Number(info.lastInsertRowid),
   ]);
+  publish({
+    type: "deployment.created",
+    deploymentId: Number(info.lastInsertRowid),
+    serviceId: serviceIdNum,
+  });
   return NextResponse.json(rows[0], { status: 201 });
 }
