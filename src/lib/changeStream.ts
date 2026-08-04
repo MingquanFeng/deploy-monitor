@@ -141,6 +141,17 @@ export function affectsServiceList(event: ChangeEvent): boolean {
   return !isDeploymentEvent(event);
 }
 
+/**
+ * 统计页（/stats）：只看部署记录的变化 —— 服务维度的增减改不改统计口径
+ * （services 不参与成功/失败/MTTR 任何计算）。
+ *
+ * 这个判定函数独立于 affectsDeploymentList：后者混了 service.* 是因为
+ * 部署历史那张表里有 service_name 列 —— 这里表里全是数字，不混。
+ */
+export function affectsAnyDeployment(event: ChangeEvent): boolean {
+  return isDeploymentEvent(event);
+}
+
 // ---------------------------------------------------------------------------
 // 连接：单例 + 引用计数
 //

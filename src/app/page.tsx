@@ -109,12 +109,17 @@ export default function Dashboard() {
     <div>
       <h1 className="mb-4 text-2xl font-bold">仪表盘</h1>
 
-      <dl className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+      <dl className="mb-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatCard label="服务总数" value={services.length} />
         <StatCard label="当前失败" value={failedCount} tone={failedCount > 0 ? "danger" : "neutral"} />
         <StatCard label="进行中" value={pendingCount} tone={pendingCount > 0 ? "warning" : "neutral"} />
         <StatCard label="部署记录" value={deployments.length} />
       </dl>
+      <p className="mb-6">
+        <Link href="/stats" className="text-sm text-blue-600 hover:underline">
+          查看健康度统计 →
+        </Link>
+      </p>
 
       {services.length === 0 ? (
         <div className="rounded-lg border border-dashed border-gray-300 bg-white py-20 text-center text-gray-500">
