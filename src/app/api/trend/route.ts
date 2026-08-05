@@ -17,13 +17,32 @@ const MAX_DAYS = 30;
 /** 3 天以内保留小时细节,超过则降级到日,避免点过密看不清趋势 */
 const HOUR_GRANULARITY_CUTOFF = 3;
 
-type RawHourRow = {
-  h: string; // substr(started_at, 1, 13) → 本地日历小时 YYYY-MM-DD HH
-  count: number;
+/** env 在 SQL 端不参与 GROUP BY,JS 端按硬编码 3 种展开。
+ * 不用 SELECT DISTINCT environment —— 空集时仍要保证三个 key 都出现,
+ * 前端就不必再兜 null/undefined。
+ *
+ * 与 timeline 一致 —— 后者每个 env 多 success/pending 两个数字,
+ * 本路由 total+failed 两个,与 /api/stats 的 by_env 区分开。
+ */
+const ENVS = ["test", "staging", "prod"] as const;
+type Env = (typeof ENVS)[number];
+
+/** 每个 (env) 桶的形状:总数 + 失败数。
+ * 与 /api/stats 的 by_env 区分开(stats 还带 success/pending)。*/
+type EnvBucket = { total: number; failed: number };
+
+type PointShape = {
+  ts: string;
+  test: EnvBucket;
+  staging: EnvBucket;
+  prod: EnvBucket;
 };
-type RawDayRow = {
-  d: string; // substr(started_at, 1, 10) → 本地日历日 YYYY-MM-DD
-  count: number;
+
+type RawEnvRow = {
+  bucket: string; // substr(started_at, 1, trimLength) → 本地日历日/小时
+  environment: string;
+  total: number;
+  failed: number;
 };
 
 /**
@@ -98,6 +117,34 @@ function shiftDay(dayKey: string, dayOffset: number): string {
   );
 }
 
+/** 空 bucket(env 全 0);空库时也要保证 3 个 env key 都存在。 */
+function emptyBuckets(): { test: EnvBucket; staging: EnvBucket; prod: EnvBucket } {
+  const e = (): EnvBucket => ({ total: 0, failed: 0 });
+  return { test: e(), staging: e(), prod: e() };
+}
+
+/**
+ * by_env 维度的聚合 SQL:按 (bucket, environment) 折叠,每个 group 输出
+ * total(全部状态)+ failed(仅失败)两个数字。
+ *
+ * 4 个 `?` 都填同一个 trimLength(13=hour 模式,10=day 模式),SQLite 会按字面值
+ * 4 次绑定 —— 走参数化避免字符串拼接。
+ *
+ * 不在原 count SQL 上叠积 —— 原查询保留为 AGGREGATE_SQL_COUNT,新查询独立,
+ * 可读性优先。
+ */
+const AGGREGATE_SQL_BY_ENV = `
+  SELECT substr(started_at, 1, ?) AS bucket,
+         environment,
+         COUNT(*)                                       AS total,
+         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
+    FROM deployments
+   WHERE started_at IS NOT NULL
+     AND substr(started_at, 1, ?) >= ?
+     AND substr(started_at, 1, ?) <= ?
+   GROUP BY substr(started_at, 1, ?), environment
+` as const;
+
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const days = parseDays(searchParams.get("days"));
@@ -121,28 +168,42 @@ export async function GET(req: NextRequest) {
     const windowStart = shiftHour(today, -(days - 1) * 24);
     const windowEnd = `${today} 23`;
 
-    type Raw = RawHourRow;
-    const rows = query<Raw>(
+    const rows = query<RawEnvRow>(
       db,
-      `SELECT substr(started_at, 1, 13) AS h,
-              COUNT(*)                 AS count
-         FROM deployments
-        WHERE started_at IS NOT NULL
-          AND substr(started_at, 1, 13) >= ?
-          AND substr(started_at, 1, 13) <= ?
-        GROUP BY substr(started_at, 1, 13)`,
-      [windowStart, windowEnd]
+      AGGREGATE_SQL_BY_ENV,
+      // SQL 中 `?` 顺序:SELECT/2×WHERE/GROUP BY 处都用 trimLength,中间两个是窗口端点
+      [13, 13, windowStart, 13, windowEnd, 13]
     );
 
-    const counts = new Map<string, number>();
-    for (const r of rows) counts.set(r.h, r.count);
+    // 按 bucket 聚合到 { test, staging, prod } 三桶
+    const agg = new Map<string, { test: EnvBucket; staging: EnvBucket; prod: EnvBucket }>();
+    for (const r of rows) {
+      let bucket = agg.get(r.bucket);
+      if (!bucket) {
+        bucket = emptyBuckets();
+        agg.set(r.bucket, bucket);
+      }
+      const env = (ENVS as readonly string[]).includes(r.environment)
+        ? (r.environment as Env)
+        : null;
+      if (!env) continue; // 防御:枚举外的脏数据
+      bucket[env].total = r.total;
+      bucket[env].failed = r.failed;
+    }
 
+    // 0 数据时间段按已知窗口以 1h 步长补全 —— 前端画 3 条线需要固定 N 个点
     const totalPoints = days * 24;
-    const points: { ts: string; count: number }[] = [];
+    const points: PointShape[] = [];
     for (let i = 0; i < totalPoints; i++) {
       // 起点是 windowStart(=windowEnd - totalPoints + 1 hour)
       const ts = shiftHour(windowStart, i);
-      points.push({ ts: `${ts}:00:00`, count: counts.get(ts) ?? 0 });
+      const b = agg.get(ts) ?? emptyBuckets();
+      points.push({
+        ts: `${ts}:00:00`,
+        test: { ...b.test },
+        staging: { ...b.staging },
+        prod: { ...b.prod },
+      });
     }
     return NextResponse.json({ days, granularity, points });
   }
@@ -151,26 +212,38 @@ export async function GET(req: NextRequest) {
   const windowStart = shiftDay(today, -(days - 1));
   const windowEnd = today;
 
-  type Raw = RawDayRow;
-  const rows = query<Raw>(
+  const rows = query<RawEnvRow>(
     db,
-    `SELECT substr(started_at, 1, 10) AS d,
-            COUNT(*)                 AS count
-       FROM deployments
-      WHERE started_at IS NOT NULL
-        AND substr(started_at, 1, 10) >= ?
-        AND substr(started_at, 1, 10) <= ?
-      GROUP BY substr(started_at, 1, 10)`,
-    [windowStart, windowEnd]
+    AGGREGATE_SQL_BY_ENV,
+    [10, 10, windowStart, 10, windowEnd, 10]
   );
 
-  const counts = new Map<string, number>();
-  for (const r of rows) counts.set(r.d, r.count);
+  const agg = new Map<string, { test: EnvBucket; staging: EnvBucket; prod: EnvBucket }>();
+  for (const r of rows) {
+    let bucket = agg.get(r.bucket);
+    if (!bucket) {
+      bucket = emptyBuckets();
+      agg.set(r.bucket, bucket);
+    }
+    const env = (ENVS as readonly string[]).includes(r.environment)
+      ? (r.environment as Env)
+      : null;
+    if (!env) continue;
+    bucket[env].total = r.total;
+    bucket[env].failed = r.failed;
+  }
 
-  const points: { ts: string; count: number }[] = [];
+  // 0 数据时间段按已知窗口以 1d 步长补全
+  const points: PointShape[] = [];
   for (let i = 0; i < days; i++) {
     const ts = shiftDay(windowStart, i);
-    points.push({ ts: `${ts} 00:00:00`, count: counts.get(ts) ?? 0 });
+    const b = agg.get(ts) ?? emptyBuckets();
+    points.push({
+      ts: `${ts} 00:00:00`,
+      test: { ...b.test },
+      staging: { ...b.staging },
+      prod: { ...b.prod },
+    });
   }
   return NextResponse.json({ days, granularity, points });
 }

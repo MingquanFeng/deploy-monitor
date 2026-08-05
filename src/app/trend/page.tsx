@@ -1,16 +1,22 @@
 "use client";
 
 /**
- * 部署频率趋势图。
+ * 部署频率趋势图（按环境拆分）。
  *
  * 手写 SVG 折线图，不引图表库。理由不是「造轮子有趣」，而是成本核算：
  * recharts/chart.js 打进 bundle 是 100~200KB 级别的量，而这里需要的
- * 全部能力是「一条折线 + 若干圆点 + 五条网格线」——三十行 path 拼接就够。
+ * 全部能力是「六条折线 + 若干圆点 + 五条网格线」——几十行 path 拼接就够。
  * 库带来的响应式容器、动画、图例系统在这个页面一个都用不上。
  *
- * 数据契约：`GET /api/trend?days=N` → { days, granularity, points[] }。
+ * 数据契约：`GET /api/trend?days=N` → { days, granularity, points[] }，
+ * 每个 point 含 test/staging/prod 三个 env，每个 env 含 total/failed 两个数。
  * granularity 由后端按 days 决定（<=3 → hour，>3 → day），前端不猜、只读，
  * 因为坐标轴的标注策略要跟着它走。
+ *
+ * 视觉编码：
+ *   实线 = 总部署数；虚线 = 失败数。
+ *   三种环境配色与 /timeline、/stats 的 ENV_BADGE 保持一致（test 蓝、staging 紫、prod 红）。
+ *   失败线下方加 env 同色半透明填充，把「失败集中区」可视化为色块。
  *
  * 后端并行实现期间可能 404 —— 与 /stats、/timeline 同款兜底：保留上一次的
  * 数据而不是清空，避免图表「消失一帧再画回来」的闪烁。
@@ -21,10 +27,18 @@ import { useChangeStream } from "@/hooks/useChangeStream";
 import { affectsAnyDeployment } from "@/lib/changeStream";
 import { BUTTON_SECONDARY } from "@/lib/constants";
 
+/** 单个环境的口径：总部署数 + 失败数。 */
+interface EnvBucket {
+  total: number;
+  failed: number;
+}
+
 /** 单个数据点。ts 是 "YYYY-MM-DD HH:MM:SS" 的本地时间字符串。 */
 interface TrendPoint {
   ts: string;
-  count: number;
+  test: EnvBucket;
+  staging: EnvBucket;
+  prod: EnvBucket;
 }
 
 /** `GET /api/trend` 响应形状。 */
@@ -42,6 +56,33 @@ const WINDOW_OPTIONS = [
   { days: 30, label: "近 30 天" },
 ] as const;
 type WindowDays = (typeof WINDOW_OPTIONS)[number]["days"];
+
+/**
+ * 环境的展示顺序 = 部署流水线的推进顺序（test → staging → prod），不是字母序。
+ * 读者的眼睛从左到右扫过去，正好是一次变更从测试走到生产的路径。
+ * 复用 /stats 里的 ENV_ORDER 让两页语义对齐：test/staging/prod 永远是这顺序。
+ */
+const ENV_ORDER = ["test", "staging", "prod"] as const;
+type EnvKey = (typeof ENV_ORDER)[number];
+
+/**
+ * 每个 env 的视觉配置。
+ *
+ * stroke-* 是 solid 折线（总部署数）的颜色；fill-* 是 dashed 折线下方半透明
+ * 填充（失败区域）的颜色。两套色阶互相对齐（同色系、不同明度），保证读者
+ * 一眼就能把「test 的失败区」和「test 的总数线」关联起来。
+ *
+ * Tailwind JIT 不会扫描运行时拼接的类名（`stroke-${color}-600`），所以必须
+ * 把每个完整字面量写出来，列在这里集中管理而不是散在 JSX 模板字面量里。
+ */
+const ENV_STYLE: Record<
+  EnvKey,
+  { stroke: string; fill: string; label: string }
+> = {
+  test: { stroke: "#2563eb", fill: "#2563eb", label: "test" },
+  staging: { stroke: "#9333ea", fill: "#9333ea", label: "staging" },
+  prod: { stroke: "#dc2626", fill: "#dc2626", label: "prod" },
+};
 
 // ---------------------------------------------------------------------------
 // SVG 几何常量
@@ -73,7 +114,7 @@ const Y_SEGMENTS = 4;
  * 计算 Y 轴上界。
  *
  * 约束：这是**计数**轴，刻度必须是整数 —— 「1.5 次部署」没有意义。
- * 所以不能简单地 `yMax = maxCount` 再等分：max=7 时四等分得到 1.75/3.5/5.25，
+ * 所以不能简单地 `yMax = maxValue` 再等分：max=7 时四等分得到 1.75/3.5/5.25，
  * 三个刻度全是小数。
  *
  * 做法：把上界向上取整到 Y_SEGMENTS 的倍数，于是每一段的高度天然是整数。
@@ -83,11 +124,11 @@ const Y_SEGMENTS = 4;
  *
  * 下界固定 0：部署次数没有负数，且浮动基线会夸大波动幅度，是图表的经典误导。
  * 全 0 数据（新库、或该窗口内无部署）返回 Y_SEGMENTS 而不是 0，
- * 否则后面 `count / yMax` 会除零。
+ * 否则后面 `value / yMax` 会除零。
  */
-function computeYMax(maxCount: number): number {
-  if (maxCount <= 0) return Y_SEGMENTS;
-  return Math.ceil(maxCount / Y_SEGMENTS) * Y_SEGMENTS;
+function computeYMax(maxValue: number): number {
+  if (maxValue <= 0) return Y_SEGMENTS;
+  return Math.ceil(maxValue / Y_SEGMENTS) * Y_SEGMENTS;
 }
 
 /** "YYYY-MM-DD HH:MM:SS" → "MM-DD"。 */
@@ -159,6 +200,63 @@ function xLabelText(
   return toHour(point.ts) === "00" ? toMonthDay(point.ts) : toHour(point.ts);
 }
 
+/**
+ * 折线路径生成器。
+ *
+ * 提取出来是因为现在有 6 条线（3 env × 2 指标），写 6 次 `coords.map(...)` 模板
+ * 既冗余也容易漏边界。getValue 把「从 TrendPoint 里取数」的策略外传，
+ * maxValue 跟着一起传避免重复扫描 —— 调用方已经计算好了。
+ *
+ * 一个点的退化情况：返回 "" 让上层跳过 <path> 渲染。一条 path 的两个端点
+ * 重合是合法的（退化直线），但不渲染单点更省事。
+ */
+function buildPath(
+  points: TrendPoint[],
+  xAt: (i: number) => number,
+  yAt: (count: number) => number,
+  getValue: (p: TrendPoint) => number
+): string {
+  if (points.length < 2) return "";
+  return points
+    .map((p, i) => {
+      const x = xAt(i);
+      const y = yAt(getValue(p));
+      return `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+}
+
+/**
+ * 折线下方填充区域路径。
+ *
+ * 失败数画成折线之外，再在折线和 X 轴（y=PAD_TOP+CHART_H）之间画一个
+ * 半透明多边形 —— 让「哪里集中失败」在视觉上变成一块色块，而不是要看
+ * Y 轴刻度心算。沿用折线同样的 xAt/yAt 保证左右两端对齐，否则填充区
+ * 会比折线宽/窄一点点，边缘参差。
+ *
+ * 关闭路径用 Z 把终点连回起点，让 SVG 引擎闭合图形而非用 fillRule 猜。
+ */
+function buildAreaPath(
+  points: TrendPoint[],
+  xAt: (i: number) => number,
+  yAt: (count: number) => number,
+  getValue: (p: TrendPoint) => number,
+  baselineY: number
+): string {
+  if (points.length < 2) return "";
+  const top = points
+    .map((p, i) => {
+      const x = xAt(i);
+      const y = yAt(getValue(p));
+      return `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  // 从最后一点走到 baseline，再回到第一点的 baseline，最后闭合。
+  const firstX = xAt(0).toFixed(1);
+  const lastX = xAt(points.length - 1).toFixed(1);
+  return `${top} L${lastX},${baselineY} L${firstX},${baselineY} Z`;
+}
+
 export default function TrendPage() {
   const [days, setDays] = useState<WindowDays>(7);
   const [data, setData] = useState<TrendResponse | null>(null);
@@ -189,7 +287,7 @@ export default function TrendPage() {
    * 所有几何量一次算完。
    *
    * 放进 useMemo 而不是在 JSX 里内联计算：SSE 触发的 re-render 可能相当频繁
-   * （一次批量部署会连着推好几条事件），而 30 点的坐标换算虽然便宜，
+   * （一次批量部署会连着推好几条事件），而 30 点 × 6 条线的坐标换算虽然便宜，
    * 但把它和 data 绑在一起能让「渲染只是读值」这件事在代码上显式成立。
    */
   const geom = useMemo(() => {
@@ -198,8 +296,21 @@ export default function TrendPage() {
     if (n === 0) return null;
 
     const granularity = data!.granularity;
-    const maxCount = Math.max(...points.map((p) => p.count));
-    const yMax = computeYMax(maxCount);
+
+    /**
+     * Y 轴上界取所有 line（3 env × 2 指标）里的最大值，统一归一化。
+     * 这样 6 条线共用同一个标尺，绝对值才能横比。
+     * 例如 prod 总数 8、test 失败 5、prod 失败 3，yMax 取 8 即可。
+     */
+    let maxValue = 0;
+    for (const p of points) {
+      for (const env of ENV_ORDER) {
+        const b = p[env];
+        if (b.total > maxValue) maxValue = b.total;
+        if (b.failed > maxValue) maxValue = b.failed;
+      }
+    }
+    const yMax = computeYMax(maxValue);
 
     /**
      * X 等分。n=1 时 (n-1)=0 会得到 Infinity，单独处理成「摆在正中」——
@@ -214,20 +325,46 @@ export default function TrendPage() {
 
     const coords = points.map((p, i) => ({
       x: xAt(i),
-      y: yAt(p.count),
       point: p,
       index: i,
     }));
 
     /**
-     * 折线路径。第一个点 M，其余 L。
-     * 坐标保留一位小数：SVG 接受浮点，但 "123.45678901" 这种全精度串
-     * 会让 30 点的 d 属性膨胀到近 1KB，且没有任何视觉收益 —— 一位小数
-     * 在 800 宽的 viewBox 里已经远低于一个物理像素。
+     * 6 条线的路径。
+     * total* = 实线，failed* = 虚线 + 半透明填充。
+     *
+     * 顺序：先画所有填充（在下层），再画所有实线/虚线（在上层），
+     * 这样填充不会盖住实线 —— 渲染顺序就是 SVG 的 z-order。
      */
-    const linePath = coords
-      .map((c, i) => `${i === 0 ? "M" : "L"}${c.x.toFixed(1)},${c.y.toFixed(1)}`)
-      .join(" ");
+    const paths: Array<{
+      env: EnvKey;
+      kind: "total" | "failed";
+      d: string;
+    }> = [];
+    const areas: Array<{ env: EnvKey; d: string }> = [];
+
+    for (const env of ENV_ORDER) {
+      paths.push({
+        env,
+        kind: "total",
+        d: buildPath(points, xAt, yAt, (p) => p[env].total),
+      });
+      paths.push({
+        env,
+        kind: "failed",
+        d: buildPath(points, xAt, yAt, (p) => p[env].failed),
+      });
+      areas.push({
+        env,
+        d: buildAreaPath(
+          points,
+          xAt,
+          yAt,
+          (p) => p[env].failed,
+          PAD_TOP + CHART_H
+        ),
+      });
+    }
 
     /** Y 轴刻度值，从 0 到 yMax 均分。段高是整数（见 computeYMax）。 */
     const yTicks = Array.from(
@@ -236,14 +373,39 @@ export default function TrendPage() {
     );
 
     /**
-     * 峰值点。取**第一个**达到 max 的点而不是最后一个：
-     * 多峰并列时，读者更关心「什么时候开始出现这个量级」。
-     * maxCount === 0 时不标峰值 —— 「峰值 0 次」是噪声不是信息。
+     * 峰值点。在 6 条线里找 total 最大的那个点，**同时记下它是哪个 env**，
+     * 气泡文字会带上 env 名 —— 单看「峰值 12 次」读者还要去找是哪条线，
+     * 加上「@ prod」一秒定位。
+     *
+     * 多峰并列时取第一个（test → staging → prod 顺序的 env × 时间顺序的 index），
+     * 读者更关心「什么时候开始出现这个量级」，而不是末尾的同高点。
+     * maxValue === 0 时不标 —— 「峰值 0 次」是噪声不是信息。
      */
-    const peak =
-      maxCount > 0 ? coords.find((c) => c.point.count === maxCount) ?? null : null;
+    let peak: {
+      x: number;
+      y: number;
+      ts: string;
+      value: number;
+      env: EnvKey;
+    } | null = null;
+    if (maxValue > 0) {
+      outer: for (const env of ENV_ORDER) {
+        for (let i = 0; i < points.length; i++) {
+          if (points[i][env].total === maxValue) {
+            peak = {
+              x: xAt(i),
+              y: yAt(maxValue),
+              ts: points[i].ts,
+              value: maxValue,
+              env,
+            };
+            break outer;
+          }
+        }
+      }
+    }
 
-    return { points, n, granularity, maxCount, yMax, coords, linePath, yTicks, peak };
+    return { points, n, granularity, maxValue, yMax, coords, paths, areas, yTicks, peak };
   }, [data]);
 
   return (
@@ -306,7 +468,7 @@ export default function TrendPage() {
             viewBox={`0 0 ${VB_WIDTH} ${VB_HEIGHT}`}
             preserveAspectRatio="xMidYMid meet"
             role="img"
-            aria-label={`最近 ${days} 天部署频率趋势，峰值 ${geom.maxCount} 次`}
+            aria-label={`最近 ${days} 天部署频率趋势，按环境拆分`}
             className="h-auto w-full min-w-[520px]"
           >
             {/*
@@ -389,42 +551,90 @@ export default function TrendPage() {
             )}
 
             {/*
-              折线。fill="none" 是必须的 —— path 默认填充黑色，
-              漏掉它会得到一大块黑色多边形而不是一条线。
-              linejoin/linecap 用 round：折点多且密时，miter 尖角在
-              陡峭的转折处会甩出很长的刺。
+              失败区域填充。在折线层之下，让色块成为「底色」而不是盖在折线上。
+              fill-opacity=0.18 —— 失败区本意是「引起注意」而不是「主导视觉」，
+              太浓会和实线抢戏、太淡则被白底吃掉。0.18 配合同色 stroke 视觉
+              重量翻倍，但又不至于糊成一块色斑。
             */}
-            <path
-              d={geom.linePath}
-              fill="none"
-              stroke="#2563eb"
-              strokeWidth={2}
-              strokeLinejoin="round"
-              strokeLinecap="round"
-            />
+            {geom.areas.map((a) =>
+              a.d ? (
+                <path
+                  key={`area-${a.env}`}
+                  d={a.d}
+                  fill={ENV_STYLE[a.env].fill}
+                  fillOpacity={0.18}
+                  stroke="none"
+                />
+              ) : null
+            )}
 
             {/*
-              数据点。每个点都画，包括 count=0 的 —— 空白处的圆点本身就是
+              6 条折线。total = 实线（strokeWidth 2），failed = 虚线（dasharray 4 3、
+              strokeWidth 1.5）。failed 用更细的笔触让两条线重叠时不至于完全遮住
+              total —— 视觉上层级是「总部署是主干、失败是叠加层」。
+
+              渲染顺序按 env 走（test → staging → prod），同一指标下后画的盖先画的。
+              当 prod 的失败线恰好和 staging 的总线条重叠时，prod 红会盖住
+              staging 紫，这正是 prod「红色高于一切」的语义。
+            */}
+            {geom.paths.map((p) => {
+              if (!p.d) return null;
+              const isFailed = p.kind === "failed";
+              const envStyle = ENV_STYLE[p.env];
+              return (
+                <path
+                  key={`line-${p.env}-${p.kind}`}
+                  d={p.d}
+                  fill="none"
+                  stroke={envStyle.stroke}
+                  strokeWidth={isFailed ? 1.5 : 2}
+                  strokeDasharray={isFailed ? "4 3" : undefined}
+                  strokeLinejoin="round"
+                  strokeLinecap="round"
+                />
+              );
+            })}
+
+            {/*
+              数据点。每个点都画，包括所有数 = 0 的 —— 空白处的圆点本身就是
               「这个时段确实没有部署」的信息，而不是「这段数据缺失」。
+              同一 env 下 total/failed 同 x 不同 y 都画一个圆 —— 两个数相同
+              时圆点会重叠成实心，读者看到「这一天的 prod 总数 = 失败数」也是
+              有意义的（全是失败的部署）。
 
               tooltip 用 SVG 原生 <title>：浏览器免费提供 hover 气泡，
               零 JS、零状态、键盘和读屏器都能拿到。代价是延迟约 1 秒且样式
               不可控 —— 对一个「看趋势为主、查具体值为辅」的图表是划算的交换。
               <title> 必须是元素的第一个子节点才生效。
             */}
-            {geom.coords.map((c) => (
-              <circle
-                key={`pt-${c.point.ts}`}
-                cx={c.x}
-                cy={c.y}
-                r={3}
-                fill="#2563eb"
-              >
-                <title>
-                  {toReadable(c.point.ts, geom.granularity)} · {c.point.count} 次部署
-                </title>
-              </circle>
-            ))}
+            {geom.coords.flatMap((c) =>
+              ENV_ORDER.flatMap((env) => {
+                const b = c.point[env];
+                const envStyle = ENV_STYLE[env];
+                return [
+                  { env, kind: "total" as const, value: b.total, color: envStyle.stroke, yAt: (v: number) => PAD_TOP + CHART_H - (v / geom.yMax) * CHART_H },
+                  { env, kind: "failed" as const, value: b.failed, color: envStyle.stroke, yAt: (v: number) => PAD_TOP + CHART_H - (v / geom.yMax) * CHART_H },
+                ].map((dot) => {
+                  if (dot.value === 0) return null;
+                  const y = dot.yAt(dot.value);
+                  return (
+                    <circle
+                      key={`pt-${c.point.ts}-${dot.env}-${dot.kind}`}
+                      cx={c.x}
+                      cy={y}
+                      r={dot.kind === "total" ? 2.5 : 2}
+                      fill={dot.color}
+                      fillOpacity={dot.kind === "failed" ? 0.6 : 1}
+                    >
+                      <title>
+                        {toReadable(c.point.ts, geom.granularity)} · {dot.env}{" "}
+                        · {dot.kind === "total" ? "总部署" : "失败"} {dot.value}
+                      </title>
+                    </circle>
+                  );
+                });
+              })
+            )}
 
             {/* 峰值气泡。位置计算与设色理由见下方 PEAK 注释块。 */}
             {geom.peak && (
@@ -433,13 +643,13 @@ export default function TrendPage() {
                   cx={geom.peak.x}
                   cy={geom.peak.y}
                   r={6}
-                  fill="#dc2626"
+                  fill={ENV_STYLE[geom.peak.env].stroke}
                   stroke="#ffffff"
                   strokeWidth={2}
                 >
                   <title>
-                    峰值 {geom.maxCount} 次 ·{" "}
-                    {toReadable(geom.peak.point.ts, geom.granularity)}
+                    峰值 {geom.peak.value} 次 · {geom.peak.env} ·{" "}
+                    {toReadable(geom.peak.ts, geom.granularity)}
                   </title>
                 </circle>
                 {/*
@@ -472,10 +682,10 @@ export default function TrendPage() {
                   }
                   fontSize={11}
                   fontWeight={600}
-                  fill="#dc2626"
+                  fill={ENV_STYLE[geom.peak.env].stroke}
                 >
-                  峰值 {geom.maxCount} 次 @{" "}
-                  {toReadable(geom.peak.point.ts, geom.granularity)}
+                  峰值 {geom.peak.value} 次 @ {geom.peak.env} ·{" "}
+                  {toReadable(geom.peak.ts, geom.granularity)}
                 </text>
               </g>
             )}
@@ -488,22 +698,50 @@ export default function TrendPage() {
         图例用和图里完全相同的颜色画小色块，读者不用记「蓝色是什么」——
         对照即可。粒度也在这里说明：用户选了「近 3 天」却看到 72 个点，
         需要一句话解释为什么横轴突然变成小时。
+
+        6 项图例（3 env × 总/失败）两两一组排版：每组竖排两个 mini 图例
+        （实线=总、虚线=失败），三组之间用横向间距分组。这样总-失败的语义
+        关系比「6 个一排横过来」更紧。
       */}
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm text-gray-500">
-        <div className="flex flex-wrap items-center gap-4">
-          <span className="inline-flex items-center gap-1.5">
-            <svg width="16" height="8" aria-hidden="true">
-              <line x1="0" y1="4" x2="16" y2="4" stroke="#2563eb" strokeWidth="2" />
-              <circle cx="8" cy="4" r="3" fill="#2563eb" />
-            </svg>
-            <span className="text-xs">部署次数</span>
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <svg width="16" height="12" aria-hidden="true">
-              <circle cx="8" cy="6" r="5" fill="#dc2626" stroke="#ffffff" strokeWidth="2" />
-            </svg>
-            <span className="text-xs">峰值</span>
-          </span>
+        <div className="flex flex-wrap items-center gap-5">
+          {ENV_ORDER.map((env) => {
+            const s = ENV_STYLE[env];
+            return (
+              <div key={`legend-${env}`} className="flex flex-col gap-1">
+                <span className="inline-flex items-center gap-1.5">
+                  <svg width="16" height="8" aria-hidden="true">
+                    <line
+                      x1="0"
+                      y1="4"
+                      x2="16"
+                      y2="4"
+                      stroke={s.stroke}
+                      strokeWidth={2}
+                    />
+                  </svg>
+                  <span className="text-xs font-medium text-gray-700">
+                    {s.label}
+                  </span>
+                  <span className="text-xs text-gray-400">总部署</span>
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <svg width="16" height="8" aria-hidden="true">
+                    <line
+                      x1="0"
+                      y1="4"
+                      x2="16"
+                      y2="4"
+                      stroke={s.stroke}
+                      strokeWidth={1.5}
+                      strokeDasharray="4 3"
+                    />
+                  </svg>
+                  <span className="text-xs text-gray-500">失败</span>
+                </span>
+              </div>
+            );
+          })}
           {geom && (
             <span className="text-xs text-gray-400">
               粒度：
@@ -515,10 +753,14 @@ export default function TrendPage() {
           {geom?.peak && (
             <span className="text-xs">
               峰值{" "}
-              <strong className="font-semibold text-red-600">
-                {geom.maxCount} 次
+              <strong
+                className="font-semibold"
+                style={{ color: ENV_STYLE[geom.peak.env].stroke }}
+              >
+                {geom.peak.value} 次
               </strong>{" "}
-              出现在 {toReadable(geom.peak.point.ts, geom.granularity)}
+              出现在 {geom.peak.env} ·{" "}
+              {toReadable(geom.peak.ts, geom.granularity)}
             </span>
           )}
           <span className="text-xs">
