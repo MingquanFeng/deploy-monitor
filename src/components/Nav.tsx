@@ -16,6 +16,7 @@ const LINKS = [
   { href: "/", label: "仪表盘" },
   { href: "/stats", label: "统计" },
   { href: "/timeline", label: "时间线" },
+  { href: "/trend", label: "趋势" },
   { href: "/services", label: "服务管理" },
   { href: "/deployments", label: "部署历史" },
 ] as const;
